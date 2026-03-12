@@ -1,0 +1,12 @@
+{
+  "enabled": true,
+  "features": {
+    "qc": true,
+    "report": true,
+    "highlight": true
+  },
+  "ui": {
+    "qcLabel": "QC",
+    "reportLabel": "Report"
+  }
+}
