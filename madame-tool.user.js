@@ -1,4 +1,14 @@
 // ==UserScript==
+// @name         Madame Worklist Tool
+// @namespace    https://github.com/AlbertoBrb
+// @version      1.0.0
+// @description  Madame dashboard tools
+// @match        https://madame.ynap.biz/*
+// @grant        GM_addStyle
+// @run-at       document-idle
+// @downloadURL  https://raw.githubusercontent.com/AlbertoBrb/madame-tool/main/madame-tool.user.js
+// @updateURL    https://raw.githubusercontent.com/AlbertoBrb/madame-tool/main/madame-tool.user.js
+// ==UserScript==
 // @name         Madame Worklist All-in-One (Layout v1 + Engine v5.9) - Refined + Search VIDs
 // @namespace    https://tampermonkey.net/
 // @version      5.11.1
