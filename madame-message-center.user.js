@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Madame Message Center
 // @namespace    https://tampermonkey.net/
-// @version      1.0.0
+// @version      1.1.0
 // @description  Central message system for Madame Tools
 // @author       You
 // @match        https://madame.ynap.biz/*
@@ -14,13 +14,18 @@
 
   const GLOBAL_KEY = "__MADAME_MESSAGE_CENTER__";
   if (window[GLOBAL_KEY]) return;
-  window[GLOBAL_KEY] = { startedAt: Date.now(), version: "1.0.0" };
+  window[GLOBAL_KEY] = { startedAt: Date.now(), version: "1.1.0" };
 
-  const MESSAGE_URL = "https://raw.githubusercontent.com/AlbertoBrb/madame-tool/refs/heads/main/madame-message.json";
+  const MESSAGE_URL = "https://raw.githubusercontent.com/AlbertoBrb/madame-tool/main/madame-message.json";
   const SEEN_KEY = "madame_message_center_seen_v1";
+  const STYLE_ID = "madame-message-center-style";
+
+  let autoCloseTimer = null;
 
   function addStyle(cssText) {
+    if (document.getElementById(STYLE_ID)) return;
     const style = document.createElement("style");
+    style.id = STYLE_ID;
     style.textContent = cssText;
     document.head.appendChild(style);
   }
@@ -33,7 +38,7 @@
     }
   }
 
-  async function loadRemoteMessage() {
+  async function loadRemoteMessageData() {
     try {
       const res = await fetch(`${MESSAGE_URL}?t=${Date.now()}`, {
         cache: "no-store"
@@ -47,6 +52,20 @@
       console.warn("[Madame Message Center] load failed", err);
       return null;
     }
+  }
+
+  function normalizeMessages(data) {
+    if (!data || typeof data !== "object") return [];
+
+    if (Array.isArray(data.messages)) {
+      return data.filter ? data.messages.filter(Boolean) : data.messages;
+    }
+
+    if (data.id || data.message || data.title) {
+      return [data];
+    }
+
+    return [];
   }
 
   function loadSeenMap() {
@@ -77,12 +96,28 @@
     const path = window.location.pathname;
 
     return pages.some((p) => {
-      if (p === path) return true;
-      if (p.endsWith("*")) {
-        return path.startsWith(p.slice(0, -1));
-      }
+      const rule = String(p || "").trim();
+      if (!rule) return false;
+      if (rule === path) return true;
+      if (rule.endsWith("*")) return path.startsWith(rule.slice(0, -1));
       return false;
     });
+  }
+
+  function isWithinDateWindow(msg) {
+    const now = Date.now();
+
+    if (msg.start) {
+      const start = new Date(msg.start).getTime();
+      if (!Number.isNaN(start) && now < start) return false;
+    }
+
+    if (msg.end) {
+      const end = new Date(msg.end).getTime();
+      if (!Number.isNaN(end) && now > end) return false;
+    }
+
+    return true;
   }
 
   function ensureStyles() {
@@ -138,12 +173,28 @@
         font-weight: 800;
       }
 
+      #madame-message-center .mmc-close:hover {
+        background: rgba(255,255,255,0.10);
+      }
+
       #madame-message-center .mmc-body {
         padding: 0 14px 14px;
         font-size: 13px;
         line-height: 1.45;
         color: rgba(255,255,255,0.88);
         white-space: pre-wrap;
+      }
+
+      #madame-message-center .mmc-link {
+        display: inline-block;
+        margin-top: 10px;
+        color: #d8b46a;
+        text-decoration: none;
+        font-weight: 700;
+      }
+
+      #madame-message-center .mmc-link:hover {
+        text-decoration: underline;
       }
 
       #madame-message-center[data-type="info"] {
@@ -165,6 +216,12 @@
   function removeBanner() {
     const old = document.getElementById("madame-message-center");
     if (!old) return;
+
+    if (autoCloseTimer) {
+      clearTimeout(autoCloseTimer);
+      autoCloseTimer = null;
+    }
+
     old.classList.remove("show");
     setTimeout(() => old.remove(), 180);
   }
@@ -197,30 +254,54 @@
     body.className = "mmc-body";
     body.textContent = String(msg.message || "");
 
+    if (msg.link) {
+      const link = document.createElement("a");
+      link.className = "mmc-link";
+      link.href = String(msg.link);
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = "Open";
+      body.appendChild(document.createElement("br"));
+      body.appendChild(link);
+    }
+
     wrap.appendChild(head);
     wrap.appendChild(body);
 
     document.body.appendChild(wrap);
     requestAnimationFrame(() => wrap.classList.add("show"));
+
+    const autoClose = Number(msg.autoClose);
+    if (Number.isFinite(autoClose) && autoClose > 0) {
+      autoCloseTimer = setTimeout(removeBanner, autoClose);
+    }
   }
 
-  async function checkMessage() {
-    const msg = await loadRemoteMessage();
-    if (!msg) return;
-    if (!msg.enabled) return;
+  async function checkMessages() {
+    const data = await loadRemoteMessageData();
+    const messages = normalizeMessages(data);
+    if (!messages.length) return;
 
-    const id = String(msg.id || "").trim();
-    if (!id) return;
+    for (const msg of messages) {
+      if (!msg || typeof msg !== "object") continue;
+      if (!msg.enabled) continue;
 
-    if (!pageMatches(msg.pages)) return;
+      const id = String(msg.id || "").trim();
+      if (!id) continue;
 
-    const showOnce = !!msg.showOnce;
-    if (showOnce && hasSeen(id)) return;
+      if (!pageMatches(msg.pages)) continue;
+      if (!isWithinDateWindow(msg)) continue;
 
-    showBanner(msg);
+      const showOnce = !!msg.showOnce;
+      if (showOnce && hasSeen(id)) continue;
 
-    if (showOnce) {
-      markSeen(id);
+      showBanner(msg);
+
+      if (showOnce) {
+        markSeen(id);
+      }
+
+      break;
     }
   }
 
@@ -230,7 +311,7 @@
       return;
     }
 
-    checkMessage();
+    checkMessages();
   }
 
   init();
