@@ -3,7 +3,10 @@
 Install the tools below.
 
 ## Worklist Tool
-[Install](https://raw.githubusercontent.com/AlbertoBrb/madame-tool/main/madame-tool.user.js)
+[Install](LINK-RAW/madame-tool.user.js)
 
 ## Search Tool
-[Install](https://raw.githubusercontent.com/AlbertoBrb/madame-tool/main/madame-search.user.js)
+[Install](LINK-RAW/madame-search.user.js)
+
+## Message Center
+[Install](LINK-RAW/madame-message-center.user.js)
