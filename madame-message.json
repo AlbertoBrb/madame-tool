@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "id": "msg-001",
+  "type": "info",
+  "title": "Madame Tools",
+  "message": "Welcome. Message center is active.",
+  "showOnce": true,
+  "pages": ["*"]
+}
