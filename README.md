@@ -1,6 +1,12 @@
 # Madame Tools
 
-Install the tools below.
+Internal userscripts for `https://madame.ynap.biz/*`
+
+## Installation
+
+1. Install Tampermonkey in Chrome
+2. Install the scripts below
+3. Open `madame.ynap.biz`
 
 ---
 
@@ -8,8 +14,8 @@ Install the tools below.
 
 Main dashboard and QC tools for `/worklist`.
 
-Install:
-https://raw.githubusercontent.com/AlbertoBrb/madame-tool/main/madame-tool.user.js
+**Install:**  
+[madame-tool.user.js](https://raw.githubusercontent.com/AlbertoBrb/madame-tool/main/madame-tool.user.js)
 
 ---
 
@@ -17,8 +23,8 @@ https://raw.githubusercontent.com/AlbertoBrb/madame-tool/main/madame-tool.user.j
 
 Utilities for `/search`.
 
-Install:
-https://raw.githubusercontent.com/AlbertoBrb/madame-tool/main/madame-search.user.js
+**Install:**  
+[madame-search.user.js](https://raw.githubusercontent.com/AlbertoBrb/madame-tool/main/madame-search.user.js)
 
 ---
 
@@ -26,5 +32,25 @@ https://raw.githubusercontent.com/AlbertoBrb/madame-tool/main/madame-search.user
 
 Displays announcements and updates.
 
-Install:
-https://raw.githubusercontent.com/AlbertoBrb/madame-tool/main/madame-message-center.user.js
+**Install:**  
+[madame-message-center.user.js](https://raw.githubusercontent.com/AlbertoBrb/madame-tool/main/madame-message-center.user.js)
+
+---
+
+## Remote Files
+
+### Config
+[madame-config.json](https://raw.githubusercontent.com/AlbertoBrb/madame-tool/main/madame-config.json)
+
+### Messages
+[madame-message.json](https://raw.githubusercontent.com/AlbertoBrb/madame-tool/main/madame-message.json)
+
+---
+
+## Notes
+
+- `madame-tool.user.js` = main tool
+- `madame-search.user.js` = search tool
+- `madame-message-center.user.js` = announcement system
+- Messages are managed remotely through `madame-message.json`
+- Configuration is managed remotely through `madame-config.json`
