@@ -1,7 +1,3 @@
-# Madame Tools
-
-Internal tools for `https://madame.ynap.biz`
-
 ## Install Tampermonkey
 Install Tampermonkey in Chrome.
 
