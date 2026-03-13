@@ -16,7 +16,7 @@
   if (window[GLOBAL_KEY]) return;
   window[GLOBAL_KEY] = { startedAt: Date.now(), version: "1.0.0" };
 
-  const MESSAGE_URL = "const MESSAGE_URL = "https://raw.githubusercontent.com/AlbertoBrb/madame-tools/main/madame-message.json";
+  const MESSAGE_URL = "https://raw.githubusercontent.com/AlbertoBrb/madame-tool/refs/heads/main/madame-message.json";
   const SEEN_KEY = "madame_message_center_seen_v1";
 
   function addStyle(cssText) {
