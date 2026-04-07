@@ -535,8 +535,14 @@
         color: var(--mwl-txt);
         background: linear-gradient(160deg, var(--mwl-bg), var(--mwl-bg2));
         border-radius: var(--mwl-r);
-        margin: 6px 0 10px;
+        margin: 0;
         z-index: 200;
+        /* Position is set inline by JS after mount */
+      }
+      /* Force overflow visible so fixed children are not clipped */
+      .MuiBox-root:has(#mwl-panel),
+      .MuiPaper-root:has(#mwl-panel) {
+        overflow: visible !important;
       }
       #mwl-panel.mwl-visible { display: block; }
       #mwl-panel.mwl-minimized .mwl-drawer,
@@ -817,6 +823,34 @@
       }
       #mwl-panel.mwl-minimized #mwl-restore-bar { display: flex; }
       #mwl-panel.mwl-minimized .mwl-strip { display: none; }
+
+      /* Minimized: white compact pill, right-aligned in flow */
+      #mwl-panel.mwl-minimized {
+        background: rgba(255,255,255,0.96) !important;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.08) !important;
+        border-radius: 8px !important;
+        /* Shrink to pill size and push to the right of its container */
+        width: auto !important;
+        margin-left: auto !important;
+        display: block;
+      }
+      #mwl-panel.mwl-minimized #mwl-restore-bar {
+        padding: 5px 12px;
+        white-space: nowrap;
+      }
+      #mwl-panel.mwl-minimized .mwl-restore-label {
+        color: rgba(0,0,0,0.38);
+      }
+      #mwl-panel.mwl-minimized .mwl-restore-chev {
+        color: rgba(0,0,0,0.22);
+      }
+      #mwl-panel.mwl-minimized:hover {
+        box-shadow: 0 2px 8px rgba(0,0,0,0.12) !important;
+      }
+      #mwl-panel.mwl-minimized #mwl-restore-bar:hover .mwl-restore-label {
+        color: rgba(0,0,0,0.65);
+      }
+
       .mwl-restore-label {
         font-size: 10px; font-weight: 800; letter-spacing: .10em; text-transform: uppercase;
         color: rgba(255,255,255,0.50);
@@ -941,36 +975,47 @@
   function loadFloatPos(){ try{ return JSON.parse(localStorage.getItem(FLOAT_KEY)||"null"); }catch{return null;} }
   function saveFloatPos(x,y,w){ try{ localStorage.setItem(FLOAT_KEY,JSON.stringify({x,y,w})); }catch{} }
 
-  // ── Worklist: fixed panel that follows anchor on scroll ──
+  // ── Worklist: fixed, geometry derived from anchor at mount ──
+  function getAppHeaderBottom(){
+    let h=0;
+    for(const el of document.querySelectorAll("header.MuiAppBar-root,header[class*='MuiAppBar']")){
+      const s=getComputedStyle(el);
+      if(s.position==="fixed"||s.position==="sticky") h=Math.max(h,el.getBoundingClientRect().bottom);
+    }
+    return h||56;
+  }
+
   function applyFixedGeometry(panel,anchor){
-    const r=anchor.getBoundingClientRect();
-    const top=Math.max(8,r.bottom+4);
+    const ar=anchor.getBoundingClientRect();
+    const headerBottom=getAppHeaderBottom();
+    const top=Math.max(headerBottom+4, ar.bottom+4);
     panel.style.cssText=`
       position:fixed!important;
       top:${top}px!important;
-      left:${r.left}px!important;
-      width:${r.width}px!important;
-      z-index:9000!important;
+      left:${ar.left}px!important;
+      width:${ar.width}px!important;
+      z-index:1250!important;
       margin:0!important;
-      cursor:default;
+      display:block;
     `;
+    // Placeholder reserves the panel's visual space in the flow so
+    // products don't start immediately under the Filters box
     if(!_fixedPlaceholder){
       _fixedPlaceholder=document.createElement("div");
       _fixedPlaceholder.id="mwl-placeholder";
-      _fixedPlaceholder.style.cssText="pointer-events:none;visibility:hidden;";
+      _fixedPlaceholder.style.cssText="pointer-events:none;visibility:hidden;flex-shrink:0;";
     }
-    _fixedPlaceholder.style.height=`${panel.offsetHeight+10}px`;
+    _fixedPlaceholder.style.height=`${panel.offsetHeight+8}px`;
     if(!_fixedPlaceholder.parentNode)anchor.insertAdjacentElement("afterend",_fixedPlaceholder);
   }
 
   function startGeometrySync(panel,anchor){
-    // _scrollHandler is called by the unified _onScroll RAF loop in attachListeners
+    applyFixedGeometry(panel,anchor); // sync, before first paint
+    // Update on scroll so panel follows Filters as page scrolls
     _scrollHandler=()=>applyFixedGeometry(panel,anchor);
     if(_resizeObserver)_resizeObserver.disconnect();
     _resizeObserver=new ResizeObserver(()=>applyFixedGeometry(panel,anchor));
-    _resizeObserver.observe(anchor);
     _resizeObserver.observe(document.documentElement);
-    requestAnimationFrame(()=>applyFixedGeometry(panel,anchor));
   }
 
   function stopGeometrySync(){
@@ -1091,11 +1136,11 @@
 
   function isEmbedded(panel){
     if(!panel?.isConnected)return false;
-    if(isSearchRoute())return panel.parentNode===document.body;
     const all=document.querySelectorAll(`#${PANEL_ID}`);
     if(all.length>1){all.forEach(p=>{if(p!==panel)p.remove();});return false;}
-    const anchor=findAnchor(); if(!anchor)return false;
-    return anchor.nextElementSibling===panel||anchor.nextElementSibling?.id==="mwl-placeholder";
+    if(isSearchRoute())return panel.parentNode===document.body&&panel.classList.contains("mwl-floating");
+    // Worklist: panel on body, anchor still present
+    return panel.parentNode===document.body&&!!findAnchor();
   }
 
   function mountPanel(panel){
@@ -1113,13 +1158,15 @@
 
     const anchor=findAnchor();
     if(!anchor){
-      // Anchor not in DOM yet — retry on next frame (handles React deferred renders)
       requestAnimationFrame(()=>{ if(mounted&&isSupportedRoute())mountPanel(panel); });
       return;
     }
-    anchor.insertAdjacentElement("afterend",panel);
-    panel.classList.add("mwl-visible");
+    // Panel lives on body as fixed element — no in-flow space, no layout interference
+    if(!document.body.contains(panel))document.body.appendChild(panel);
     panel.classList.remove("mwl-floating");
+    // Apply geometry synchronously so panel appears in correct position from frame 0
+    applyFixedGeometry(panel,anchor);
+    panel.classList.add("mwl-visible");
     startGeometrySync(panel,anchor);
   }
 
