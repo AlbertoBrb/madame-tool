@@ -1,21 +1,14 @@
 // ==UserScript==
-// @name         Madame Search Helper
-// @namespace    https://github.com/AlbertoBrb
-// @version      1.0.0
-// @description  Search tools
-// @match        https://madame.ynap.biz/search*
-// @grant        GM_addStyle
-// @run-at       document-idle
-// @downloadURL  https://raw.githubusercontent.com/AlbertoBrb/madame-tool/main/madame-search.user.js
-// @updateURL    https://raw.githubusercontent.com/AlbertoBrb/madame-tool/main/madame-search.user.js
-// ==UserScript==
-// @name         Madame Channel Helper + Auto Search Fallback
-// @namespace    custom-madame
+// @name         Madame Channel
+// @namespace    https://tampermonkey.net/
 // @version      1.0.0
 // @description  Header/favicons per channel, click-to-toggle MRP/NAP e fallback automatico della Search sul channel opposto.
+// @author       AlbertoBrb
 // @match        https://madame.ynap.biz/*
 // @run-at       document-idle
 // @grant        none
+// @updateURL    https://raw.githubusercontent.com/AlbertoBrb/madame-tool/main/madame-channel.user.js
+// @downloadURL  https://raw.githubusercontent.com/AlbertoBrb/madame-tool/main/madame-channel.user.js
 // ==/UserScript==
 
 (function () {
@@ -84,7 +77,7 @@
 
   function log(...args) {
     if (CONFIG.debug) {
-      console.log('[Madame Helper]', ...args);
+      console.log('[Madame Channel]', ...args);
     }
   }
 
@@ -168,7 +161,7 @@
         log('Channel changed to', changed);
         return true;
       } catch (err) {
-        console.error('[Madame Helper] switchChannel failed:', err);
+        console.error('[Madame Channel] switchChannel failed:', err);
         return false;
       } finally {
         tempStyle.remove();
