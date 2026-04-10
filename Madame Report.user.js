@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Madame Report
 // @namespace    https://tampermonkey.net/
-// @version      1.2.2
+// @version      1.2.3
 // @description  Export Report in formato Excel XML (SpreadsheetML) con categoria, brand, tag. Bottone flottante con progress ring. Coordinated con Madame Dashboard via MadameUtils.
 // @author       AlbertoBrb
 // @match        https://madame.ynap.biz/*
@@ -467,6 +467,21 @@
     if (_scrollHandler)   { window.removeEventListener("scroll",    _scrollHandler);   _scrollHandler   = null; }
   }
 
+  // Waits up to maxMs for MadameUtils._lastProducts to be populated by Dashboard,
+  // then resolves with shared data or null if timeout expires.
+  function waitForSharedProducts(maxMs = 8000) {
+    return new Promise(resolve => {
+      const start = Date.now();
+      const check = () => {
+        const shared = getSharedProducts();
+        if (shared) { resolve(shared); return; }
+        if (Date.now() - start > maxMs) { resolve(null); return; }
+        setTimeout(check, 200);
+      };
+      check();
+    });
+  }
+
   function ensureButton() {
     if (document.getElementById("mwl-rpt-btn")) { updateProgressUI(); return; }
     ensureStyles();
@@ -478,7 +493,7 @@
       ring,
       el("div", { class: "mwl-rpt-text" }, [
         el("span", { class: "mwl-rpt-label" }, ["Report"]),
-        el("span", { class: "mwl-rpt-sub",  id: "mwl-rpt-sub"  }, ["—"])
+        el("span", { class: "mwl-rpt-sub", id: "mwl-rpt-sub" }, ["—"])
       ])
     ]);
 
@@ -513,7 +528,24 @@
     });
 
     document.body.appendChild(btn);
-    updateProgressUI();
+
+    // Defer first UI update to idle — never block the main thread at mount time.
+    // Wait for Dashboard shared data before doing any DOM scan.
+    const scheduleFirstUpdate = () => {
+      if ("requestIdleCallback" in window) {
+        requestIdleCallback(() => updateProgressUI(), { timeout: 3000 });
+      } else {
+        setTimeout(() => updateProgressUI(), 1500);
+      }
+    };
+
+    if (getSharedProducts()) {
+      // Dashboard already has data — safe to update soon
+      scheduleFirstUpdate();
+    } else {
+      // Wait for Dashboard to populate MadameUtils before touching the DOM
+      waitForSharedProducts(8000).then(() => scheduleFirstUpdate());
+    }
 
     _resizeHandler = () => {
       const b = document.getElementById("mwl-rpt-btn"); if (!b) return;
@@ -535,17 +567,17 @@
   function mount() {
     if (!isToolRoute()) return;
     ensureButton();
-    // Start interval only if main tool (MadameUtils) is not available.
-    // When Dashboard is active, _lastProducts is already kept fresh and
-    // the scroll handler updates the ring with zero DOM scan cost.
-    // On large worklists (100+ VIDs) the fallback DOM scan is expensive —
-    // use a conservative 3000ms interval and skip when tab is hidden.
+    // Only start interval after Dashboard data is available.
+    // If Dashboard is absent, wait before starting fallback polling
+    // to avoid DOM scan during page load.
     if (!_progressTimer) {
-      _progressTimer = setInterval(() => {
-        if (!isToolRoute() || document.hidden) return;
-        // If shared data exists, just refresh the UI — no DOM scan
-        updateProgressUI();
-      }, getSharedProducts() ? 5000 : 3000);
+      waitForSharedProducts(8000).then(shared => {
+        if (!isToolRoute()) return; // route may have changed while waiting
+        _progressTimer = setInterval(() => {
+          if (!isToolRoute() || document.hidden) return;
+          updateProgressUI();
+        }, shared ? 5000 : 3000);
+      });
     }
   }
 
