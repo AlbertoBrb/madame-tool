@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Madame Report
 // @namespace    https://tampermonkey.net/
-// @version      1.2.0
+// @version      1.2.2
 // @description  Export Report in formato Excel XML (SpreadsheetML) con categoria, brand, tag. Bottone flottante con progress ring. Coordinated con Madame Dashboard via MadameUtils.
 // @author       AlbertoBrb
 // @match        https://madame.ynap.biz/*
@@ -279,10 +279,12 @@
 
   // Progress ring
   function updateProgressUI() {
+    if (document.hidden) return;
     const btn = document.getElementById("mwl-rpt-btn");
     if (!btn) return;
     const ring = btn.querySelector(".mwl-rpt-ring");
     const txt  = btn.querySelector(".mwl-rpt-ringText");
+    const sub  = btn.querySelector(".mwl-rpt-sub");
     if (!ring || !txt) return;
 
     const total  = parseVariantsTotal();
@@ -292,6 +294,7 @@
       btn.classList.remove("is-done");
       ring.style.setProperty("--deg", "0deg");
       txt.textContent = "";
+      if (sub) sub.textContent = "—";
       ring.title = "Total variants not available yet";
       return;
     }
@@ -301,6 +304,7 @@
     const done = loaded >= total;
     btn.classList.toggle("is-done", done);
     txt.textContent = done ? "✓" : "";
+    if (sub) sub.textContent = done ? `${loaded} loaded` : `${loaded} / ${total}`;
     ring.title = `Loaded ${loaded} / ${total} (${Math.round(p * 100)}%)`;
   }
 
@@ -309,58 +313,144 @@
   function ensureStyles() {
     if (_stylesInjected) return; _stylesInjected = true;
     GM_addStyle(`
+      /* ── Shared tokens (mirrors Dashboard :root) ── */
+      #mwl-rpt-btn, #mwl-rpt-toast {
+        --mwl-bg:     rgba(15,15,19,0.98);
+        --mwl-bg2:    rgba(21,21,27,0.98);
+        --mwl-brd:    rgba(255,255,255,0.09);
+        --mwl-gold:   #d8b46a;
+        --mwl-gold2:  rgba(216,180,106,0.14);
+        --mwl-green:  #67e08a;
+        --mwl-shadow: 0 4px 20px rgba(0,0,0,0.42);
+        --mwl-r:      10px;
+        --mwl-font:   ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
+      }
+
+      /* ── Button ── */
       #mwl-rpt-btn {
-        position:fixed; z-index:999999; width:168px; height:42px;
-        border-radius:16px; border:1px solid rgba(216,180,106,0.28);
-        background:linear-gradient(180deg,rgba(10,10,12,0.92),rgba(22,22,28,0.92));
-        box-shadow:0 16px 50px rgba(0,0,0,0.58); backdrop-filter:blur(10px);
-        color:rgba(255,255,255,0.92);
-        font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
-        user-select:none; display:flex; align-items:center; justify-content:center;
-        cursor:grab; overflow:hidden; gap:10px; padding:0 12px 0 10px;
-        transition:transform .10s ease,border-color .12s ease,background .12s ease;
-        letter-spacing:.14em; text-transform:uppercase; font-weight:900; font-size:12px;
+        position: fixed;
+        z-index: 999999;
+        width: 148px;
+        height: 38px;
+        border-radius: var(--mwl-r);
+        border: 1px solid var(--mwl-brd);
+        background: linear-gradient(160deg, var(--mwl-bg), var(--mwl-bg2));
+        box-shadow: var(--mwl-shadow);
+        backdrop-filter: blur(10px);
+        color: rgba(255,255,255,0.90);
+        font-family: var(--mwl-font);
+        user-select: none;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 12px 0 10px;
+        cursor: grab;
+        overflow: hidden;
+        transition: transform .10s ease, border-color .14s ease, box-shadow .14s ease;
       }
-      #mwl-rpt-btn:active { cursor:grabbing; }
-      #mwl-rpt-btn:hover {
-        border-color:rgba(216,180,106,0.42);
-        background:linear-gradient(180deg,rgba(8,8,10,0.96),rgba(20,20,26,0.96));
-        transform:translateY(-0.6px);
+      #mwl-rpt-btn:active  { cursor: grabbing; }
+      #mwl-rpt-btn:hover   {
+        border-color: rgba(216,180,106,0.28);
+        box-shadow: 0 6px 24px rgba(0,0,0,0.52);
+        transform: translateY(-0.5px);
       }
+
+      /* Gold left accent — same as Dashboard strip */
       #mwl-rpt-btn::before {
-        content:""; position:absolute; left:0; top:10px; bottom:10px; width:4px;
-        border-radius:999px;
-        background:linear-gradient(180deg,rgba(216,180,106,0.95),rgba(216,180,106,0.35));
-        opacity:.95;
+        content: "";
+        position: absolute;
+        left: 0; top: 8px; bottom: 8px;
+        width: 3px;
+        border-radius: 999px;
+        background: linear-gradient(180deg, var(--mwl-gold), rgba(216,180,106,0.30));
+        opacity: .90;
       }
+
+      /* ── Label + counter block ── */
+      #mwl-rpt-btn .mwl-rpt-text {
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+        min-width: 0;
+        flex: 1;
+      }
+      #mwl-rpt-btn .mwl-rpt-label {
+        font-size: 11px;
+        font-weight: 900;
+        letter-spacing: .14em;
+        text-transform: uppercase;
+        color: rgba(255,255,255,0.88);
+        line-height: 1.1;
+      }
+      #mwl-rpt-btn .mwl-rpt-sub {
+        font-size: 9.5px;
+        font-weight: 700;
+        letter-spacing: .04em;
+        color: rgba(255,255,255,0.38);
+        line-height: 1.1;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+
+      /* ── Progress ring ── */
       #mwl-rpt-btn .mwl-rpt-ring {
-        width:18px; height:18px; border-radius:999px; flex:0 0 auto; position:relative;
-        background:conic-gradient(rgba(216,180,106,0.92) var(--deg,0deg),rgba(255,255,255,0.10) 0deg);
-        box-shadow:0 0 0 1px rgba(255,255,255,0.10) inset;
+        width: 20px; height: 20px;
+        border-radius: 999px;
+        flex: 0 0 auto;
+        position: relative;
+        background: conic-gradient(
+          rgba(216,180,106,0.88) var(--deg,0deg),
+          rgba(255,255,255,0.08) 0deg
+        );
+        box-shadow: 0 0 0 1px rgba(255,255,255,0.08) inset;
+        transition: background .3s ease;
       }
       #mwl-rpt-btn .mwl-rpt-ring::after {
-        content:""; position:absolute; inset:2px; border-radius:999px;
-        background:rgba(12,12,16,0.92);
+        content: "";
+        position: absolute;
+        inset: 3px;
+        border-radius: 999px;
+        background: var(--mwl-bg);
       }
       #mwl-rpt-btn .mwl-rpt-ringText {
-        position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
-        font-size:12px; font-weight:900; color:rgba(255,255,255,0.92); z-index:2; line-height:1;
+        position: absolute; inset: 0;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 10px; font-weight: 900;
+        color: rgba(255,255,255,0.90);
+        z-index: 2; line-height: 1;
       }
-      #mwl-rpt-btn.is-done { border-color:rgba(216,180,106,0.46); }
+
+      /* ── Done state ── */
+      #mwl-rpt-btn.is-done {
+        border-color: rgba(103,224,138,0.22);
+      }
       #mwl-rpt-btn.is-done .mwl-rpt-ring {
-        background:conic-gradient(rgba(103,224,138,0.92) 360deg,rgba(103,224,138,0.92) 0deg);
+        background: conic-gradient(
+          rgba(103,224,138,0.90) 360deg,
+          rgba(103,224,138,0.90) 0deg
+        );
       }
+      #mwl-rpt-btn.is-done .mwl-rpt-sub {
+        color: rgba(103,224,138,0.70);
+      }
+
+      /* ── Toast (identical to Dashboard) ── */
       #mwl-rpt-toast {
-        position:fixed; z-index:999999; left:18px; bottom:18px;
-        padding:10px 12px; border-radius:14px;
-        background:rgba(18,18,22,0.92); border:1px solid rgba(255,255,255,0.14);
-        color:rgba(255,255,255,0.92);
-        font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
-        font-size:12px; box-shadow:0 16px 50px rgba(0,0,0,0.55); backdrop-filter:blur(10px);
-        transform:translateY(10px); opacity:0; pointer-events:none;
-        transition:opacity .18s ease,transform .18s ease;
+        position: fixed; z-index: 999999;
+        left: 18px; bottom: 18px;
+        padding: 9px 12px;
+        border-radius: 12px;
+        background: rgba(15,15,19,0.94);
+        border: 1px solid rgba(255,255,255,0.12);
+        color: rgba(255,255,255,0.90);
+        font-family: var(--mwl-font);
+        font-size: 12px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.45);
+        backdrop-filter: blur(10px);
+        transform: translateY(10px); opacity: 0; pointer-events: none;
+        transition: opacity .18s ease, transform .18s ease;
       }
-      #mwl-rpt-toast.show { opacity:1; transform:translateY(0); }
+      #mwl-rpt-toast.show { opacity: 1; transform: translateY(0); }
     `);
   }
 
@@ -385,7 +475,11 @@
     const pos  = loadPos();
     const ring = el("div", { class: "mwl-rpt-ring" }, [el("div", { class: "mwl-rpt-ringText" })]);
     const btn  = el("div", { id: "mwl-rpt-btn", title: "Drag per spostare • Click per esportare Report" }, [
-      ring, el("span", {}, ["REPORT"])
+      ring,
+      el("div", { class: "mwl-rpt-text" }, [
+        el("span", { class: "mwl-rpt-label" }, ["Report"]),
+        el("span", { class: "mwl-rpt-sub",  id: "mwl-rpt-sub"  }, ["—"])
+      ])
     ]);
 
     btn.style.left = `${clamp(pos.x, 0, window.innerWidth  - 180)}px`;
@@ -441,8 +535,17 @@
   function mount() {
     if (!isToolRoute()) return;
     ensureButton();
+    // Start interval only if main tool (MadameUtils) is not available.
+    // When Dashboard is active, _lastProducts is already kept fresh and
+    // the scroll handler updates the ring with zero DOM scan cost.
+    // On large worklists (100+ VIDs) the fallback DOM scan is expensive —
+    // use a conservative 3000ms interval and skip when tab is hidden.
     if (!_progressTimer) {
-      _progressTimer = setInterval(() => { if (isToolRoute()) updateProgressUI(); }, 900);
+      _progressTimer = setInterval(() => {
+        if (!isToolRoute() || document.hidden) return;
+        // If shared data exists, just refresh the UI — no DOM scan
+        updateProgressUI();
+      }, getSharedProducts() ? 5000 : 3000);
     }
   }
 
