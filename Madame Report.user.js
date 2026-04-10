@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Madame Report
 // @namespace    https://tampermonkey.net/
-// @version      1.2.3
-// @description  Export Report in formato Excel XML (SpreadsheetML) con categoria, brand, tag. Bottone flottante con progress ring. Coordinated con Madame Dashboard via MadameUtils.
+// @version      1.4.1
+// @description  Export Report in formato Excel XML (SpreadsheetML) con categoria, brand, tag. Bottone flottante draggabile. Confirm se lista parzialmente caricata.
 // @author       AlbertoBrb
 // @match        https://madame.ynap.biz/*
 // @grant        GM_addStyle
@@ -277,173 +277,67 @@
     toast(`Report esportato: ${rows.length} righe`);
   }
 
-  // Progress ring
-  function updateProgressUI() {
-    if (document.hidden) return;
-    const btn = document.getElementById("mwl-rpt-btn");
-    if (!btn) return;
-    const ring = btn.querySelector(".mwl-rpt-ring");
-    const txt  = btn.querySelector(".mwl-rpt-ringText");
-    const sub  = btn.querySelector(".mwl-rpt-sub");
-    if (!ring || !txt) return;
 
-    const total  = parseVariantsTotal();
-    const loaded = getSharedProducts()?.length ?? (() => { try { return getProductsFallback().length; } catch { return 0; } })();
-
-    if (!(typeof total === "number" && total > 0)) {
-      btn.classList.remove("is-done");
-      ring.style.setProperty("--deg", "0deg");
-      txt.textContent = "";
-      if (sub) sub.textContent = "—";
-      ring.title = "Total variants not available yet";
-      return;
-    }
-
-    const p = clamp(loaded / total, 0, 1);
-    ring.style.setProperty("--deg", `${Math.round(p * 360)}deg`);
-    const done = loaded >= total;
-    btn.classList.toggle("is-done", done);
-    txt.textContent = done ? "✓" : "";
-    if (sub) sub.textContent = done ? `${loaded} loaded` : `${loaded} / ${total}`;
-    ring.title = `Loaded ${loaded} / ${total} (${Math.round(p * 100)}%)`;
-  }
-
+  // ═══════════════════════════════════════
   // CSS
+  // ═══════════════════════════════════════
   let _stylesInjected = false;
   function ensureStyles() {
     if (_stylesInjected) return; _stylesInjected = true;
     GM_addStyle(`
-      /* ── Shared tokens (mirrors Dashboard :root) ── */
-      #mwl-rpt-btn, #mwl-rpt-toast {
-        --mwl-bg:     rgba(15,15,19,0.98);
-        --mwl-bg2:    rgba(21,21,27,0.98);
-        --mwl-brd:    rgba(255,255,255,0.09);
-        --mwl-gold:   #d8b46a;
-        --mwl-gold2:  rgba(216,180,106,0.14);
-        --mwl-green:  #67e08a;
-        --mwl-shadow: 0 4px 20px rgba(0,0,0,0.42);
-        --mwl-r:      10px;
-        --mwl-font:   ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
-      }
-
-      /* ── Button ── */
       #mwl-rpt-btn {
         position: fixed;
         z-index: 999999;
-        width: 148px;
-        height: 38px;
-        border-radius: var(--mwl-r);
-        border: 1px solid var(--mwl-brd);
-        background: linear-gradient(160deg, var(--mwl-bg), var(--mwl-bg2));
-        box-shadow: var(--mwl-shadow);
-        backdrop-filter: blur(10px);
-        color: rgba(255,255,255,0.90);
-        font-family: var(--mwl-font);
-        user-select: none;
         display: flex;
         align-items: center;
         gap: 8px;
-        padding: 0 12px 0 10px;
+        padding: 0 14px 0 10px;
+        height: 36px;
+        border-radius: 999px;
+        border: 1px solid rgba(0,0,0,0.10);
+        background: rgba(255,255,255,0.97);
+        box-shadow: 0 2px 12px rgba(0,0,0,0.14), 0 1px 3px rgba(0,0,0,0.08);
+        backdrop-filter: blur(8px);
+        color: rgba(0,0,0,0.72);
+        font-family: ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
+        font-size: 11.5px;
+        font-weight: 700;
+        letter-spacing: .02em;
+        user-select: none;
         cursor: grab;
         overflow: hidden;
-        transition: transform .10s ease, border-color .14s ease, box-shadow .14s ease;
-      }
-      #mwl-rpt-btn:active  { cursor: grabbing; }
-      #mwl-rpt-btn:hover   {
-        border-color: rgba(216,180,106,0.28);
-        box-shadow: 0 6px 24px rgba(0,0,0,0.52);
-        transform: translateY(-0.5px);
-      }
-
-      /* Gold left accent — same as Dashboard strip */
-      #mwl-rpt-btn::before {
-        content: "";
-        position: absolute;
-        left: 0; top: 8px; bottom: 8px;
-        width: 3px;
-        border-radius: 999px;
-        background: linear-gradient(180deg, var(--mwl-gold), rgba(216,180,106,0.30));
-        opacity: .90;
-      }
-
-      /* ── Label + counter block ── */
-      #mwl-rpt-btn .mwl-rpt-text {
-        display: flex;
-        flex-direction: column;
-        gap: 1px;
-        min-width: 0;
-        flex: 1;
-      }
-      #mwl-rpt-btn .mwl-rpt-label {
-        font-size: 11px;
-        font-weight: 900;
-        letter-spacing: .14em;
-        text-transform: uppercase;
-        color: rgba(255,255,255,0.88);
-        line-height: 1.1;
-      }
-      #mwl-rpt-btn .mwl-rpt-sub {
-        font-size: 9.5px;
-        font-weight: 700;
-        letter-spacing: .04em;
-        color: rgba(255,255,255,0.38);
-        line-height: 1.1;
-        font-variant-numeric: tabular-nums;
+        transition: box-shadow .12s ease, transform .10s ease, border-color .12s ease;
         white-space: nowrap;
       }
-
-      /* ── Progress ring ── */
-      #mwl-rpt-btn .mwl-rpt-ring {
-        width: 20px; height: 20px;
-        border-radius: 999px;
-        flex: 0 0 auto;
-        position: relative;
-        background: conic-gradient(
-          rgba(216,180,106,0.88) var(--deg,0deg),
-          rgba(255,255,255,0.08) 0deg
-        );
-        box-shadow: 0 0 0 1px rgba(255,255,255,0.08) inset;
-        transition: background .3s ease;
-      }
-      #mwl-rpt-btn .mwl-rpt-ring::after {
-        content: "";
-        position: absolute;
-        inset: 3px;
-        border-radius: 999px;
-        background: var(--mwl-bg);
-      }
-      #mwl-rpt-btn .mwl-rpt-ringText {
-        position: absolute; inset: 0;
-        display: flex; align-items: center; justify-content: center;
-        font-size: 10px; font-weight: 900;
-        color: rgba(255,255,255,0.90);
-        z-index: 2; line-height: 1;
+      #mwl-rpt-btn:active { cursor: grabbing; }
+      #mwl-rpt-btn:hover {
+        box-shadow: 0 4px 18px rgba(0,0,0,0.18), 0 1px 4px rgba(0,0,0,0.10);
+        transform: translateY(-1px);
       }
 
-      /* ── Done state ── */
-      #mwl-rpt-btn.is-done {
-        border-color: rgba(103,224,138,0.22);
-      }
-      #mwl-rpt-btn.is-done .mwl-rpt-ring {
-        background: conic-gradient(
-          rgba(103,224,138,0.90) 360deg,
-          rgba(103,224,138,0.90) 0deg
-        );
-      }
-      #mwl-rpt-btn.is-done .mwl-rpt-sub {
-        color: rgba(103,224,138,0.70);
+      /* Icon */
+      #mwl-rpt-btn .mwl-rpt-icon {
+        width: 18px; height: 18px;
+        flex: 0 0 18px;
+        opacity: 0.60;
       }
 
-      /* ── Toast (identical to Dashboard) ── */
+      /* Label */
+      #mwl-rpt-btn .mwl-rpt-label {
+        color: rgba(0,0,0,0.78);
+        font-weight: 700;
+      }
+
+      /* Toast */
       #mwl-rpt-toast {
         position: fixed; z-index: 999999;
         left: 18px; bottom: 18px;
-        padding: 9px 12px;
+        padding: 9px 14px;
         border-radius: 12px;
         background: rgba(15,15,19,0.94);
         border: 1px solid rgba(255,255,255,0.12);
         color: rgba(255,255,255,0.90);
-        font-family: var(--mwl-font);
+        font-family: ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
         font-size: 12px;
         box-shadow: 0 4px 20px rgba(0,0,0,0.45);
         backdrop-filter: blur(10px);
@@ -454,58 +348,50 @@
     `);
   }
 
-  // Listener tracking for cleanup
+  // ═══════════════════════════════════════
+  // Button — drag only, zero background activity
+  // ═══════════════════════════════════════
   let _dragMoveHandler = null;
   let _dragUpHandler   = null;
   let _resizeHandler   = null;
-  let _scrollHandler   = null;
 
   function removeWindowListeners() {
     if (_dragMoveHandler) { window.removeEventListener("mousemove", _dragMoveHandler); _dragMoveHandler = null; }
     if (_dragUpHandler)   { window.removeEventListener("mouseup",   _dragUpHandler);   _dragUpHandler   = null; }
     if (_resizeHandler)   { window.removeEventListener("resize",    _resizeHandler);   _resizeHandler   = null; }
-    if (_scrollHandler)   { window.removeEventListener("scroll",    _scrollHandler);   _scrollHandler   = null; }
-  }
-
-  // Waits up to maxMs for MadameUtils._lastProducts to be populated by Dashboard,
-  // then resolves with shared data or null if timeout expires.
-  function waitForSharedProducts(maxMs = 8000) {
-    return new Promise(resolve => {
-      const start = Date.now();
-      const check = () => {
-        const shared = getSharedProducts();
-        if (shared) { resolve(shared); return; }
-        if (Date.now() - start > maxMs) { resolve(null); return; }
-        setTimeout(check, 200);
-      };
-      check();
-    });
   }
 
   function ensureButton() {
-    if (document.getElementById("mwl-rpt-btn")) { updateProgressUI(); return; }
+    if (document.getElementById("mwl-rpt-btn")) return;
     ensureStyles();
     removeWindowListeners();
 
-    const pos  = loadPos();
-    const ring = el("div", { class: "mwl-rpt-ring" }, [el("div", { class: "mwl-rpt-ringText" })]);
-    const btn  = el("div", { id: "mwl-rpt-btn", title: "Drag per spostare • Click per esportare Report" }, [
-      ring,
-      el("div", { class: "mwl-rpt-text" }, [
-        el("span", { class: "mwl-rpt-label" }, ["Report"]),
-        el("span", { class: "mwl-rpt-sub", id: "mwl-rpt-sub" }, ["—"])
-      ])
+    const pos = loadPos();
+
+    // Spreadsheet export icon (inline SVG)
+    const iconSvg = `<svg class="mwl-rpt-icon" viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="2" y="1" width="11" height="14" rx="1.5" stroke="currentColor" stroke-width="1.4"/>
+      <path d="M5 5h7M5 8h7M5 11h4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+      <path d="M13 10l2.5 2.5M13 12.5l2.5-2.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+    </svg>`;
+
+    const iconEl = document.createElement("span");
+    iconEl.innerHTML = iconSvg;
+    iconEl.querySelector("svg").style.cssText = "width:18px;height:18px;flex:0 0 18px;display:block;";
+
+    const btn = el("div", { id: "mwl-rpt-btn", title: "Drag per spostare • Click per esportare Report" }, [
+      iconEl,
+      el("span", { class: "mwl-rpt-label" }, ["Export"]),
     ]);
 
     btn.style.left = `${clamp(pos.x, 0, window.innerWidth  - 180)}px`;
-    btn.style.top  = `${clamp(pos.y, 0, window.innerHeight -  60)}px`;
+    btn.style.top  = `${clamp(pos.y, 0, window.innerHeight -  50)}px`;
 
     let drag = null, suppressClick = false;
     btn.addEventListener("mousedown", e => {
       drag = { sx: e.clientX, sy: e.clientY, rect: btn.getBoundingClientRect() };
       suppressClick = false; e.preventDefault();
     });
-
     _dragMoveHandler = e => {
       if (!drag) return;
       const dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
@@ -524,28 +410,26 @@
 
     btn.addEventListener("click", () => {
       if (suppressClick) { suppressClick = false; return; }
+
+      // Check if list is partially loaded using shared Dashboard data
+      const shared    = getSharedProducts();
+      const total     = getSharedTotalVariants() ?? parseVariantsTotal();
+      const loaded    = shared ? shared.length : null;
+      const isPartial = typeof total === "number" && typeof loaded === "number" && loaded < total;
+
+      if (isPartial) {
+        const ok = window.confirm(
+          `Attenzione: sono stati caricati ${loaded} VID su ${total}.\n\n` +
+          `Scorri tutta la lista (o usa Load All ⇣ nella Dashboard) prima di esportare per includere tutti i prodotti.\n\n` +
+          `Vuoi esportare comunque i ${loaded} VID caricati?`
+        );
+        if (!ok) return;
+      }
+
       exportReportXls();
     });
 
     document.body.appendChild(btn);
-
-    // Defer first UI update to idle — never block the main thread at mount time.
-    // Wait for Dashboard shared data before doing any DOM scan.
-    const scheduleFirstUpdate = () => {
-      if ("requestIdleCallback" in window) {
-        requestIdleCallback(() => updateProgressUI(), { timeout: 3000 });
-      } else {
-        setTimeout(() => updateProgressUI(), 1500);
-      }
-    };
-
-    if (getSharedProducts()) {
-      // Dashboard already has data — safe to update soon
-      scheduleFirstUpdate();
-    } else {
-      // Wait for Dashboard to populate MadameUtils before touching the DOM
-      waitForSharedProducts(8000).then(() => scheduleFirstUpdate());
-    }
 
     _resizeHandler = () => {
       const b = document.getElementById("mwl-rpt-btn"); if (!b) return;
@@ -556,37 +440,13 @@
       savePos(Math.round(nx), Math.round(ny));
     };
     window.addEventListener("resize", _resizeHandler, { passive: true });
-
-    _scrollHandler = () => { if (isToolRoute()) updateProgressUI(); };
-    window.addEventListener("scroll", _scrollHandler, { passive: true });
   }
 
-  // Mount / unmount
-  let _progressTimer = null;
-
-  function mount() {
-    if (!isToolRoute()) return;
-    ensureButton();
-    // Only start interval after Dashboard data is available.
-    // If Dashboard is absent, wait before starting fallback polling
-    // to avoid DOM scan during page load.
-    if (!_progressTimer) {
-      waitForSharedProducts(8000).then(shared => {
-        if (!isToolRoute()) return; // route may have changed while waiting
-        _progressTimer = setInterval(() => {
-          if (!isToolRoute() || document.hidden) return;
-          updateProgressUI();
-        }, shared ? 5000 : 3000);
-      });
-    }
-  }
-
-  function unmount() {
-    document.getElementById("mwl-rpt-btn")?.remove();
-    removeWindowListeners();
-    if (_progressTimer) { clearInterval(_progressTimer); _progressTimer = null; }
-  }
-
+  // ═══════════════════════════════════════
+  // Mount / unmount — no interval, no polling, no DOM scan on load
+  // ═══════════════════════════════════════
+  function mount()   { if (isToolRoute()) ensureButton(); }
+  function unmount() { document.getElementById("mwl-rpt-btn")?.remove(); removeWindowListeners(); }
   function onRouteChange() { if (isToolRoute()) mount(); else unmount(); }
 
   // SPA hooks
