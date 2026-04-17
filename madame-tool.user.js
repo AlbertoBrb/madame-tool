@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Madame Dashboard
 // @namespace    https://tampermonkey.net/
-// @version      5.12.0
+// @version      5.25.2
 // @description  Dashboard embedded per worklist e search. Contatori Still Life / Model, navigazione VID, QC Carousel, Load All.
 // @author       AlbertoBrb
 // @match        https://madame.ynap.biz/*
@@ -16,7 +16,7 @@
 
   const GLOBAL_KEY = "__MWL_V512__";
   if (window[GLOBAL_KEY]) return;
-  window[GLOBAL_KEY] = { version: "5.12.0", startedAt: Date.now() };
+  window[GLOBAL_KEY] = { version: "5.25.2", startedAt: Date.now() };
 
   // ═══════════════════════════════════════
   // Routes
@@ -26,7 +26,6 @@
   function isWorklistRoute() { return WORKLIST_RE.test(location.pathname); }
   function isSearchRoute(){
     if(!SEARCH_RE.test(location.pathname))return false;
-    // Exclude ?t=2 (Saved Searches tab — no VID list to work with)
     const t=new URLSearchParams(location.search).get("t");
     return t!=="2";
   }
@@ -115,26 +114,91 @@
   function countPids(){ return new Set(Array.from(document.querySelectorAll("h4")).filter(h=>isPid(h.textContent)).map(h=>h.textContent.trim())).size; }
 
   async function forceLoadAllBalanced(opts={}){
-    const sc=opts.container||findScrollableContainer(),pA=opts.pauseA??220,pB=opts.pauseB??180,mL=opts.maxLoops??600,mS=opts.maxStable??5;
+    const sc=opts.container||findScrollableContainer();
+
+    // ── Tunable parameters ──
+    const pA          = opts.pauseA    ?? 350;  // base pause after each scroll step (ms)
+    const imgTimeout  = opts.imgTimeout?? 3500; // max wait per step for images to load (ms)
+    const imgPoll     = opts.imgPoll   ?? 100;  // polling interval while waiting for images (ms)
+    const renderWait  = opts.renderWait?? 300;  // extra settle at bottom before stability check (ms)
+    const mL          = opts.maxLoops  ?? 900;
+    const mS          = opts.maxStable ?? 4;
+
+    // ── Adaptive image wait ──
+    // An image is considered "pending" if:
+    //   - it is not complete (browser hasn't finished decoding), OR
+    //   - it is complete but naturalWidth === 0 (error / not yet painted)
+    // We also check that the element is currently in the viewport.
+    function pendingImgsInView(){
+      const ch=gCH(sc);
+      let count=0;
+      for(const img of document.querySelectorAll(IMG_SELECTOR)){
+        const r=img.getBoundingClientRect();
+        if(r.bottom<=0||r.top>=ch)continue; // outside viewport
+        if(!img.complete||img.naturalWidth===0)count++;
+      }
+      return count;
+    }
+
+    async function waitForImages(){
+      const deadline=Date.now()+imgTimeout;
+      while(Date.now()<deadline){
+        if(pendingImgsInView()===0)return;
+        await new Promise(r=>setTimeout(r,imgPoll));
+      }
+      // Timeout reached — continue anyway rather than hanging forever
+    }
+
     let cancelled=false;
-    const kd=(e)=>{if(e.key==="Escape")cancelled=true;}; document.addEventListener("keydown",kd);
+    const kd=(e)=>{if(e.key==="Escape")cancelled=true;};
+    document.addEventListener("keydown",kd);
+
     try{
-      let lH=gSH(sc),sH=0,lP=countPids(),sP=0;
+      let lH=gSH(sc), sH=0, lP=countPids(), sP=0;
+
       for(let i=0;i<mL;i++){
         if(cancelled)break;
-        const step=opts.stepPx??gCH(sc),top=gTop(sc),h=gSH(sc),ch=gCH(sc);
-        sTop(sc,Math.min(top+step,Math.max(0,h-ch)));
-        await new Promise(r=>setTimeout(r,pA)); await new Promise(r=>setTimeout(r,pB));
-        const t2=gTop(sc),h2=gSH(sc),ch2=gCH(sc);
-        if(typeof opts.onProgress==="function")opts.onProgress({loop:i,percent:Math.min(99,Math.round(((t2+ch2)/h2)*100)),height:h2});
+
+        // Scroll half a viewport at a time
+        const step=opts.stepPx??Math.round(gCH(sc)*0.5);
+        const top=gTop(sc), h=gSH(sc), ch=gCH(sc);
+        sTop(sc, Math.min(top+step, Math.max(0,h-ch)));
+
+        // 1. Base pause — let React render newly visible components
+        await new Promise(r=>setTimeout(r,pA));
+
+        // 2. Short extra frame for React virtual list to commit DOM nodes
+        await new Promise(r=>requestAnimationFrame(r));
+        await new Promise(r=>requestAnimationFrame(r));
+
+        // 3. Adaptive wait — hold until images in view have loaded (or timeout)
+        await waitForImages();
+
+        // Progress callback
+        const t2=gTop(sc), h2=gSH(sc), ch2=gCH(sc);
+        if(typeof opts.onProgress==="function")
+          opts.onProgress({loop:i, percent:Math.min(99,Math.round(((t2+ch2)/h2)*100)), height:h2});
+
+        // Stability check — only at bottom
         if(t2>=(h2-ch2-30)){
-          if(Math.abs(h2-lH)<2)sH++;else sH=0; lH=h2;
-          const p=countPids(); if(p===lP)sP++;else sP=0; lP=p;
+          // Extra settle to catch any final lazy-triggered renders
+          await new Promise(r=>setTimeout(r,renderWait));
+          await waitForImages();
+
+          const h3=gSH(sc);
+          if(Math.abs(h3-lH)<2)sH++; else{sH=0; lH=h3;}
+          const p=countPids(); if(p===lP)sP++; else{sP=0; lP=p;}
           if(sH>=mS&&sP>=mS)break;
+          lH=h3;
+        } else {
+          sH=0; sP=0;
         }
       }
+
       if(opts.returnToTop??true)sTop(sc,0);
-    }finally{ document.removeEventListener("keydown",kd); }
+    }finally{
+      document.removeEventListener("keydown",kd);
+    }
   }
   { const u=ensureMadameUtils(); if(!u.forceLoadAllBalanced)u.forceLoadAllBalanced=forceLoadAllBalanced; if(!u.findScrollableContainer)u.findScrollableContainer=findScrollableContainer; }
 
@@ -187,7 +251,7 @@
   let focusList=[], focusPtr=0;
   let lastHighlightedEl=null;
   let updateScheduled=false, updateTimer=null, observer=null, scrollAttached=false, mounted=false;
-  let _countsDirty=true;  // true = DOM may have changed, updateCounts needed before goNext
+  let _countsDirty=true;
   let lastAnalyses=[], lastKPIs=null, lastTagCounts=null;
   let helpOpen=false;
   let bannerExpanded=false;
@@ -200,7 +264,6 @@
     const panel=document.getElementById(PANEL_ID); if(!panel)return;
     qsa("[data-ui-key]",panel).forEach(n=>n.classList.remove("is-active"));
     panel.querySelector(`[data-ui-key="${CSS.escape(activeUIKey)}"]`)?.classList.add("is-active");
-    // Also mark clickable prog pills in strip
     qsa(".mwl-prog-clickable",panel).forEach(n=>n.classList.remove("is-active"));
     panel.querySelector(`.mwl-prog-clickable[data-ui-key="${CSS.escape(activeUIKey)}"]`)?.classList.add("is-active");
   }
@@ -223,25 +286,17 @@
   }
   function getVIDsFromSearch(){
     const vids=new Map();
-
-    // Primary: same h4 selector used in worklist
     let nodes=Array.from(document.querySelectorAll(VID_SELECTOR)).filter(n=>looksLikeVID(n.textContent));
-
-    // Fallback: any h4 with a long numeric string
     if(!nodes.length){
       nodes=Array.from(document.querySelectorAll(VID_FALLBACK_SELECTOR))
         .filter(n=>looksLikeVID((n.textContent||"").trim()));
     }
-
     for(const n of nodes){
       const vid=(n.textContent||"").trim();
       if(!vid||vids.has(vid))continue;
-      // Use the same tight root detection as the worklist — falls back to direct parent
       const root=findProductRootFromVidNode(n)||(n.parentElement||n);
       vids.set(vid,root);
     }
-
-    // If no h4 VIDs found, scan broader text but deduplicate by vid string only
     if(!vids.size){
       const re=/\b\d{15,}\b/g;
       for(const n of document.querySelectorAll("h1,h2,h3,h4,h5,h6,span,td,a")){
@@ -251,15 +306,10 @@
         }
       }
     }
-
     return Array.from(vids.entries()).map(([vid,root])=>({vid,root}));
   }
-  // Cache: root element → {fingerprint, a, tags}
-  // Fingerprint = img count + rejected count + chip text length — cheap proxy for "has this tile changed"
   const _analysisCache = new WeakMap();
   function fingerprintRoot(root){
-    // Counts imgs and rejected markers — cheap proxy for tile content changing.
-    // Chip tags are fingerprinted separately in _tagsCache.
     const imgs=root.querySelectorAll(IMG_SELECTOR).length;
     const rejected=root.querySelectorAll(REJECTED_BOX_SELECTOR).length;
     return `${imgs}:${rejected}`;
@@ -301,9 +351,10 @@
   }
   function isMissing(a){ return(a.hasINSlot&&!a.hasINShot)||(a.hasOUSlot&&!a.hasOUShot); }
   function hasNoPhotos(a){ return(a.hasINSlot?!a.hasINShot:true)&&(a.hasOUSlot?!a.hasOUShot:true); }
+  // [MOD 5] — total absence of shots (no img at all in any slot)
+  function hasTotallyNoShots(a){ return !a.hasINShot && !a.hasOUShot && (a.hasINSlot || a.hasOUSlot); }
   const _tagsCache = new WeakMap();
   function getProductTags(root){
-    // Fingerprint: concatenated chip label text — changes when tags are added/removed
     const chipText=Array.from(root.querySelectorAll(CHIP_LABEL_SELECTOR)).map(n=>n.textContent||"").join("|");
     const cached=_tagsCache.get(root);
     if(cached&&cached.fp===chipText)return cached.tags;
@@ -315,7 +366,7 @@
   function getHighlightTarget(root){
     if(!root?.isConnected)return root;
     const vw=window.innerWidth, vh=window.innerHeight;
-    const minW=vw*0.25, minH=vh*0.12;          // ~25% vw, ~12% vh
+    const minW=vw*0.25, minH=vh*0.12;
     const fallW=vw*0.18, fallH=vh*0.08;
     let n=root; for(let i=0;i<8&&n;i++){const r=n.getBoundingClientRect();if(r.width>=minW&&r.height>=minH)return n;n=n.parentElement;}
     n=root; for(let i=0;i<8&&n;i++){const r=n.getBoundingClientRect();if(r.width>=fallW&&r.height>=fallH)return n;n=n.parentElement;}
@@ -332,18 +383,19 @@
     if(type==="ouToShoot")return analyses.filter(x=>x.a.hasOUSlot&&!x.a.hasOUShot);
     if(type==="rtwVideoMissing")return analyses.filter(x=>x.tags?.has(RTW_TAG)&&!x.a.hasVideo);
     if(type==="rejected")return analyses.filter(x=>x.a.hasRejected);
+    if(type==="noShots")return analyses.filter(x=>hasTotallyNoShots(x.a));
     return analyses.filter(x=>isMissing(x.a));
   }
   function listLabel(){
     if(isSearchRoute())return"VIDs on search"; if(focus.type==="tag")return`Tag: ${focus.value}`;
     if(focus.type==="inToShoot")return"IN to shoot"; if(focus.type==="ouToShoot")return"OU to shoot";
     if(focus.type==="rtwVideoMissing")return"RTW VIDEO missing"; if(focus.type==="rejected")return"Rejected";
+    if(focus.type==="noShots")return"VID without shots";
     return"Missing";
   }
   function clearHighlight(){ if(lastHighlightedEl?.isConnected){lastHighlightedEl.classList.remove("mwl-focus-highlight");lastHighlightedEl.removeAttribute(ATTR_NEXT);} lastHighlightedEl=null; }
   function setHighlight(elm){ clearHighlight(); if(!elm)return; elm.setAttribute(ATTR_NEXT,"1"); elm.classList.add("mwl-focus-highlight"); lastHighlightedEl=elm; }
   function goNext(alert_=true){
-    // Only ricalculate if DOM has changed since last updateCounts
     if(_countsDirty)updateCounts(false);
     if(!focusList.length){if(alert_)alert(`No items found for: ${listLabel()}.`);return;}
     if(focusPtr>=focusList.length){
@@ -401,7 +453,6 @@
       const cnt=focusList.length;
       const cntEl=pill.querySelector(".mwl-mc");
       if(cntEl)cntEl.textContent=String(cnt);
-      // Label reflects active focus
       const labelEl=pill.querySelector(".mwl-pill-label");
       if(labelEl){
         if(focus.type==="inToShoot")labelEl.textContent="Still Life ";
@@ -416,7 +467,7 @@
       const ptr=cnt?`${clamp(focusPtr,0,cnt)} / ${cnt}`:"0 / 0";
       const ptrSpan=nextBtn.querySelector(".mwl-next-ptr");
       if(ptrSpan)ptrSpan.textContent=ptr;
-      else nextBtn.textContent=`Next ↓  ${ptr}`; // fallback
+      else nextBtn.textContent=`Next ↓  ${ptr}`;
     }
     const ptrEl=document.getElementById("mwl-focus-ptr");
     if(ptrEl){const cnt=focusList.length;ptrEl.textContent=cnt?`${clamp(focusPtr,0,cnt)} / ${cnt}`:"0 / 0";}
@@ -458,58 +509,382 @@
     return vidEl.closest("div")||vidEl.parentElement;
   }
   function extractQCMap_Surgical(){
-    const map={},vf=new Set();
-    for(const vidEl of Array.from(document.querySelectorAll("h4")).filter(h=>/^\d{10,}$/.test((h.textContent||"").trim()))){
-      const vid=(vidEl.textContent||"").trim(); if(!vid)continue;
-      const product=findTightProductContainer(vidEl); if(!product)continue;
-      map[vid]||={};
-      const bs=(product.querySelector(BRAND_IMG_SELECTOR_PRIMARY)||product.querySelector(BRAND_IMG_SELECTOR_FALLBACK))?.getAttribute("src")||"";
-      if(bs){map[vid]["brand"]={srcQC:absUrl(bumpIrisThumb(bs,QC_WIDTH))};vf.add("brand");}
-      for(const lbl of Array.from(product.querySelectorAll("span[title]")).filter(s=>SLOT_CODE_RE.test(s.getAttribute("title")||""))){
-        const m=(lbl.getAttribute("title")||"").trim().match(SLOT_CODE_RE); if(!m)continue;
-        const view=codeToView(m[1]); vf.add(view);
-        let slot=lbl.closest("div"); for(let j=0;j<7&&slot;j++){if(slot.querySelector(IMG_SELECTOR)||slot.querySelector("div.css-12n9byu"))break;slot=slot.parentElement;}
-        if(!slot)continue; const img=slot.querySelector(IMG_SELECTOR); if(!img)continue;
-        const src=img.getAttribute("src")||""; if(!src)continue;
-        const srcQC=bumpWidth(src,QC_WIDTH); if(!map[vid][view]||map[vid][view].srcQC===srcQC)map[vid][view]={srcQC:absUrl(srcQC)};
+    const map={}, vf=new Set();
+
+    // ── Strategy: iterate all tiles on the page, find the VID they belong to ──
+    // This avoids relying on findTightProductContainer which can fail if the
+    // h4 VID lives in a different branch from the tiles.
+    //
+    // For each tile (div.css-1dcsz0a), we walk UP the DOM to find the nearest
+    // h4 whose text is a numeric VID. That h4 is the owner of this tile.
+
+    function nearestVID(el){
+      let node=el;
+      for(let i=0;i<20&&node;i++){
+        // Check all h4 descendants of the current ancestor
+        const h4s=Array.from(node.querySelectorAll("h4"))
+          .filter(h=>/^\d{10,}$/.test((h.textContent||"").trim()));
+        if(h4s.length===1)return h4s[0].textContent.trim();
+        // If multiple h4s at this level, can't determine — go up
+        node=node.parentElement;
       }
-      for(const tile of Array.from(product.querySelectorAll(TILE_SELECTOR))){
-        const h=tile.querySelector(QC_VIDEO_HEADER_SELECTOR); if(!h||!/video/i.test(h.textContent||""))continue;
+      return null;
+    }
+
+    for(const tile of Array.from(document.querySelectorAll(TILE_SELECTOR))){
+      // ── Video tile ──
+      const hdr=tile.querySelector(QC_VIDEO_HEADER_SELECTOR);
+      if(hdr&&/video/i.test(hdr.textContent||"")){
         const img=tile.querySelector(IMG_SELECTOR); if(!img)continue;
         const src=img.getAttribute("src")||""; if(!src)continue;
+        const vid=nearestVID(tile); if(!vid)continue;
+        map[vid]||={};
         const srcQC=bumpWidth(src,QC_WIDTH); vf.add("video");
-        if(!map[vid]["video"]||map[vid]["video"].srcQC===srcQC)map[vid]["video"]={srcQC:absUrl(srcQC)};
+        if(!map[vid]["video"])map[vid]["video"]={srcQC:absUrl(srcQC)};
+        continue;
+      }
+
+      // ── Photo tile ──
+      const lbl=Array.from(tile.querySelectorAll("span[title]"))
+        .find(s=>SLOT_CODE_RE.test(s.getAttribute("title")||""));
+      if(!lbl)continue;
+      const m=(lbl.getAttribute("title")||"").trim().match(SLOT_CODE_RE); if(!m)continue;
+      const view=codeToView(m[1]); vf.add(view);
+      const img=tile.querySelector(IMG_SELECTOR);
+      if(!img)continue; // slot empty — no image to show
+      const src=img.getAttribute("src")||""; if(!src)continue;
+      const vid=nearestVID(tile); if(!vid)continue;
+      map[vid]||={};
+      const srcQC=bumpWidth(src,QC_WIDTH);
+      if(!map[vid][view])map[vid][view]={srcQC:absUrl(srcQC)};
+    }
+
+    // Brand image: one per VID, found from the product container
+    // We already have the VIDs from the tile pass — now find brand img for each
+    for(const vid of Object.keys(map)){
+      if(map[vid]["brand"])continue; // already set
+      // Find the h4 for this VID and walk up to find brand img
+      const vidEl=Array.from(document.querySelectorAll("h4"))
+        .find(h=>(h.textContent||"").trim()===vid);
+      if(!vidEl)continue;
+      let node=vidEl;
+      for(let i=0;i<16&&node;i++){
+        const bs=(node.querySelector(BRAND_IMG_SELECTOR_PRIMARY)||node.querySelector(BRAND_IMG_SELECTOR_FALLBACK))?.getAttribute("src")||"";
+        if(bs){map[vid]["brand"]={srcQC:absUrl(bumpIrisThumb(bs,QC_WIDTH))};vf.add("brand");break;}
+        node=node.parentElement;
       }
     }
     const vids=Object.keys(map).filter(v=>Object.keys(map[v]||{}).length>0);
     const orderedViews=[...QC_VIEW_ORDER.filter(v=>vf.has(v)),...Array.from(vf).filter(v=>!QC_VIEW_ORDER.includes(v)).sort()];
+    // Re-sort each VID's map keys to match VIEW_ORDER so JSON.stringify preserves order
+    for(const vid of vids){
+      const src=map[vid];
+      const sorted={};
+      for(const v of orderedViews){if(src[v])sorted[v]=src[v];}
+      for(const v of Object.keys(src)){if(!sorted[v])sorted[v]=src[v];}
+      map[vid]=sorted;
+    }
     return{vids,views:orderedViews,map,loadedCount:vids.filter(v=>Object.values(map[v]||{}).some(x=>x?.srcQC)).length};
   }
-  function openQCViewer(){
-    if(!loadFlags().enableQC)return; if(!isWorklistRoute()){alert("QC Carousel is available on /worklist pages.");return;}
-    updateCounts(false); const data=extractQCMap_Surgical();
-    if(!data.vids.length){alert("No products/images detected yet. Scroll a bit and retry.");return;}
-    const wlName=htmlEscape(getTextById("info-box-0")||"Worklist"),channelRaw=htmlEscape(getTextById("tool-channel")||"NET-A-PORTER"),brandKey=resolveBrandKey();
-    const total=parseVariantsTotal(),loaded=data.loadedCount,t=total>0?total:null;
-    const ratio=t?(loaded/t):null; let status="partial"; if(!t)status="unknown"; else if(loaded>=t)status="ok"; else if(ratio!==null&&ratio<0.5)status="low";
-    const missing=(t&&loaded<t)?(t-loaded):0, showMissing=Boolean(t&&status!=="ok");
-    const w=window.open("about:blank","_blank"); if(!w){alert("Popup blocked.");return;}
-    w.document.open(); w.document.write(buildQCHtml({data,wlName,channelRaw,brandKey,status,loaded,t,missing,showMissing})); w.document.close();
+  // ── QC Overlay — injected in-page so images load with session cookies ──
+  const QC_OVERLAY_ID = "mwl-qc-overlay";
+
+  function closeQCOverlay(){
+    document.getElementById(QC_OVERLAY_ID)?.remove();
+    document.body.style.overflow="";
   }
 
-  function buildQCHtml({data,wlName,channelRaw,brandKey,status,loaded,t,missing,showMissing}){
-    return`<!doctype html><html><head><meta charset="utf-8"><title>QC Carousel</title><base href="${location.origin}/"><style>:root{--bg:#fff;--text:#0b0c0f;--muted:#6b7280;--line:rgba(15,23,42,.12);--black:#07080a;--ok:rgb(16,185,129);--am:rgb(245,158,11);--rd:rgb(239,68,68);--un:rgb(148,163,184);}html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}.topbar{position:sticky;top:0;z-index:30;background:var(--black);color:#fff;padding:14px 18px 12px;border-bottom:1px solid rgba(255,255,255,.10);}.row1{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;}.leftRow{display:flex;align-items:center;gap:12px;}.brand{font-weight:800;letter-spacing:.24em;font-size:12px;text-transform:uppercase;}.pill{display:inline-flex;align-items:center;gap:8px;padding:7px 10px;border-radius:999px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.08);color:#fff;white-space:nowrap;}.dot{width:8px;height:8px;border-radius:999px;background:var(--un);}.pill.ok .dot{background:var(--ok);}.pill.partial .dot{background:var(--am);}.pill.low .dot{background:var(--rd);}.pill.unknown .dot{background:var(--un);}.pillText{font-size:11px;letter-spacing:.14em;text-transform:uppercase;opacity:.92;}.pillCount{font-weight:800;font-size:11.5px;}.pillMiss{margin-left:8px;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;opacity:.72;}.actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}.btn{display:inline-flex;align-items:center;justify-content:center;height:30px;padding:0 12px;border-radius:999px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:#fff;font:800 11px sans-serif;letter-spacing:.16em;text-transform:uppercase;cursor:pointer;user-select:none;}.btn:hover{background:rgba(255,255,255,.10);}.btn.on{background:rgba(255,255,255,.92);color:#07080a;border-color:rgba(255,255,255,.92);}.btnX{width:30px;padding:0;border-radius:999px;font-weight:900;}.row2{margin-top:10px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;}.channel{font-weight:700;font-size:11px;letter-spacing:.18em;text-transform:uppercase;opacity:.78;}.sep{opacity:.35;}.wlTitle{font-weight:650;font-size:14px;opacity:.96;}.grid{padding:16px 14px 28px;display:flex;flex-direction:column;gap:14px;}.block{border-top:1px solid var(--line);padding-top:12px;}.vid{font-size:12.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;margin:0 0 10px;color:#111827;}.row{display:flex;gap:10px;overflow:auto;padding-bottom:6px;}.tile{width:220px;border:1px solid var(--line);background:#fff;flex:0 0 auto;display:flex;flex-direction:column;}.imgwrap{position:relative;height:293px;background:#fff;cursor:zoom-in;overflow:hidden;}img.photo{width:100%;height:100%;object-fit:cover;display:block;user-select:none;-webkit-user-drag:none;}img.ov{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none;opacity:.92;}.refwrap{position:relative;height:293px;background:#fff;overflow:hidden;}img.ref{width:100%;height:100%;object-fit:cover;display:block;}.metaTile{padding:8px 10px;border-top:1px solid var(--line);font-size:10.5px;color:var(--muted);letter-spacing:.14em;text-transform:uppercase;}.lb{position:fixed;inset:0;background:rgba(7,8,10,.94);z-index:9999;display:none;align-items:center;justify-content:center;padding:24px;}.lb.open{display:flex;}.lbInner{position:relative;width:min(1180px,calc(100vw - 48px));height:min(92vh,980px);display:flex;align-items:center;justify-content:center;}.lbImg{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;background:#0b0c0f;}.lbX{position:absolute;top:-10px;right:-10px;width:40px;height:40px;border-radius:999px;border:1px solid rgba(255,255,255,.22);background:rgba(255,255,255,.06);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:18px;}.lbNav{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:44px;border-radius:999px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:18px;user-select:none;}.lbPrev{left:-12px;}.lbNext{right:-12px;}.lbFoot{position:fixed;bottom:14px;left:18px;color:rgba(255,255,255,.70);font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;z-index:10000;display:none;}.lb.open~.lbFoot{display:block;}</style></head><body><div class="topbar"><div class="row1"><div class="leftRow"><div class="brand">QC Carousel</div><div class="pill ${status}"><span class="dot"></span><span class="pillText">Loaded</span><span class="pillCount">${loaded}${t?` / ${t}`:""}</span>${showMissing?`<span class="pillMiss">Missing: ${missing}</span>`:""}</div></div><div class="actions"><button class="btn" id="btnGuides">Check Guides</button><button class="btn" id="btnBrand">Brand image</button><button class="btn" id="btnRefs">References</button><button class="btn btnX" id="btnRefsClose" style="display:none;">×</button></div></div><div class="row2">${channelRaw?`<div class="channel">${channelRaw}</div>`:""}<div class="sep">·</div><div class="wlTitle">${wlName}</div></div></div><div class="grid" id="grid"></div><div class="lb" id="lb" aria-hidden="true"><div class="lbInner"><button class="lbNav lbPrev" id="lbPrev">‹</button><button class="lbNav lbNext" id="lbNext">›</button><button class="lbX" id="lbX">×</button><img class="lbImg" id="lbImg" alt="QC preview"/></div></div><div class="lbFoot">Esc · ←/→ · G=Guides</div><script>const DATA=${JSON.stringify(data)};const VIEW_ORDER=${JSON.stringify(QC_VIEW_ORDER)};const OVERLAY_VIEWS=new Set(${JSON.stringify(Array.from(OVERLAY_VIEWS))});const OVERLAY_URL=${JSON.stringify(OVERLAY_SP_URL)};const BRAND=${JSON.stringify(brandKey)};const REFERENCES=${JSON.stringify(REFERENCES)};const gridEl=document.getElementById("grid");let overlayOn=false,brandOn=false,refsOn=false,refIndex=0;const RSK="mimo_qc_ref_index_v1";function vs(a,b){const ia=VIEW_ORDER.indexOf(a),ib=VIEW_ORDER.indexOf(b);if(ia===-1&&ib===-1)return a.localeCompare(b);if(ia===-1)return 1;if(ib===-1)return -1;return ia-ib;}function spD(u){try{const url=new URL(u);if(!url.searchParams.has("download"))url.searchParams.set("download","1");url.searchParams.set("_",String(Date.now()));return url.toString();}catch{return u;}}function clr(el){while(el.firstChild)el.removeChild(el.firstChild);}const NAV=[];function rebuildNav(){NAV.length=0;for(const vid of DATA.vids){let views=Object.keys(DATA.map[vid]||{}).sort(vs);if(!brandOn)views=views.filter(v=>v!=="brand");for(const view of views){const cell=DATA.map[vid][view];if(cell&&cell.srcQC)NAV.push({vid,view,src:cell.srcQC});}}}const lb=document.getElementById("lb"),lbImg=document.getElementById("lbImg"),lbX=document.getElementById("lbX"),lbPrev=document.getElementById("lbPrev"),lbNext=document.getElementById("lbNext");let idx=-1;function openLB(i){if(!NAV.length)return;idx=(i+NAV.length)%NAV.length;lbImg.src=NAV[idx].src;lb.classList.add("open");lb.setAttribute("aria-hidden","false");document.body.style.overflow="hidden";}function closeLB(){lb.classList.remove("open");lb.setAttribute("aria-hidden","true");lbImg.src="";document.body.style.overflow="";idx=-1;}lbX.addEventListener("click",closeLB);lbPrev.addEventListener("click",()=>{if(idx!==-1)openLB(idx-1);});lbNext.addEventListener("click",()=>{if(idx!==-1)openLB(idx+1);});lb.addEventListener("click",(e)=>{if(e.target===lb)closeLB();});lbImg.addEventListener("click",()=>{if(idx!==-1)openLB(idx+1);});const btnGuides=document.getElementById("btnGuides"),btnBrand=document.getElementById("btnBrand"),btnRefs=document.getElementById("btnRefs"),btnRefsClose=document.getElementById("btnRefsClose");function syncBtns(){btnGuides.classList.toggle("on",overlayOn);btnBrand.classList.toggle("on",brandOn);btnRefs.classList.toggle("on",refsOn);btnRefsClose.style.display=refsOn?"inline-flex":"none";}function getRI(){try{const o=JSON.parse(localStorage.getItem(RSK)||"{}");const n=Number(o?.[BRAND]??0);return Number.isFinite(n)?n:0;}catch{return 0;}}function setRI(i){try{const o=JSON.parse(localStorage.getItem(RSK)||"{}");o[BRAND]=i;localStorage.setItem(RSK,JSON.stringify(o));}catch{}}function getARef(){const l=REFERENCES[BRAND]||[];if(!l.length)return null;const i=((refIndex%l.length)+l.length)%l.length;return{...l[i],idx:i,total:l.length};}btnGuides.addEventListener("click",()=>{overlayOn=!overlayOn;syncBtns();render();});btnBrand.addEventListener("click",()=>{brandOn=!brandOn;syncBtns();render();});btnRefs.addEventListener("click",()=>{const l=REFERENCES[BRAND]||[];if(!l.length)return;if(!refsOn){refsOn=true;refIndex=getRI();}else{refIndex=(refIndex+1)%l.length;setRI(refIndex);}syncBtns();render();});btnRefsClose.addEventListener("click",()=>{refsOn=false;syncBtns();render();});window.addEventListener("keydown",(e)=>{if(e.key==="g"||e.key==="G"){overlayOn=!overlayOn;syncBtns();render();return;}if(!lb.classList.contains("open"))return;if(e.key==="Escape")closeLB();if(e.key==="ArrowRight"&&idx!==-1)openLB(idx+1);if(e.key==="ArrowLeft"&&idx!==-1)openLB(idx-1);});new Image().src=spD(OVERLAY_URL);function render(){clr(gridEl);const aRef=refsOn?getARef():null;rebuildNav();for(const vid of DATA.vids){let views=Object.keys(DATA.map[vid]||{}).sort(vs);if(!brandOn)views=views.filter(v=>v!=="brand");if(!views.length)continue;const block=document.createElement("div");block.className="block";const t=document.createElement("div");t.className="vid";t.textContent=vid;block.appendChild(t);const row=document.createElement("div");row.className="row";block.appendChild(row);let ir=false;for(const view of views){const cell=DATA.map[vid][view];if(!cell||!cell.srcQC)continue;const tile=document.createElement("div");tile.className="tile";const iw=document.createElement("div");iw.className="imgwrap";const img=document.createElement("img");img.className="photo";img.loading="lazy";img.src=cell.srcQC;iw.appendChild(img);const ti=NAV.findIndex(x=>x.src===cell.srcQC&&x.vid===vid&&x.view===view);iw.addEventListener("click",()=>openLB(ti>=0?ti:0));if(overlayOn&&OVERLAY_VIEWS.has(view)){const ov=document.createElement("img");ov.className="ov";ov.alt="";let tried=false;ov.onerror=()=>{if(tried)return;tried=true;try{const u=new URL(OVERLAY_URL);u.searchParams.delete("download");u.searchParams.set("_",String(Date.now()));ov.src=u.toString();}catch{}};ov.src=spD(OVERLAY_URL);iw.appendChild(ov);}tile.appendChild(iw);const meta=document.createElement("div");meta.className="metaTile";meta.textContent=view==="brand"?"brand image":view;tile.appendChild(meta);row.appendChild(tile);if(aRef&&!ir&&view==="ou"){ir=true;row.appendChild(mkRef(aRef));}}if(aRef&&!ir)row.appendChild(mkRef(aRef));if(row.children.length)gridEl.appendChild(block);}}function mkRef(aRef){const tile=document.createElement("div");tile.className="tile";const rw=document.createElement("div");rw.className="refwrap";const img=document.createElement("img");img.className="ref";img.loading="lazy";let tried=false;img.onerror=()=>{if(!tried){tried=true;try{const u=new URL(aRef.url);u.searchParams.delete("download");u.searchParams.set("_",String(Date.now()));img.src=u.toString();return;}catch{}}rw.style.cssText="background:rgba(15,23,42,.04);display:flex;align-items:center;justify-content:center;padding:14px;color:rgba(15,23,42,.55);font:800 11px sans-serif;letter-spacing:.14em;text-transform:uppercase;";rw.textContent="Reference unavailable";};img.src=spD(aRef.url);rw.appendChild(img);tile.appendChild(rw);const meta=document.createElement("div");meta.className="metaTile";meta.textContent=\`model reference • \${aRef.name} (\${aRef.idx+1}/\${aRef.total})\`;tile.appendChild(meta);return tile;}refIndex=getRI();syncBtns();render();<\/script></body></html>`;
+  function openQCViewer(){
+    if(!loadFlags().enableQC)return;
+    if(!isWorklistRoute()){alert("QC Carousel is available on /worklist pages.");return;}
+    updateCounts(false);
+    const data=extractQCMap_Surgical();
+    if(!data.vids.length){alert("No products/images detected yet. Scroll a bit and retry.");return;}
+
+    const wlName=(getTextById("info-box-0")||"Worklist").trim();
+    const channelRaw=(getTextById("tool-channel")||"NET-A-PORTER").trim();
+    const brandKey=resolveBrandKey();
+    const total=parseVariantsTotal(), loaded=data.loadedCount, t=total>0?total:null;
+    const ratio=t?(loaded/t):null;
+    let status="partial";
+    if(!t)status="unknown"; else if(loaded>=t)status="ok"; else if(ratio!==null&&ratio<0.5)status="low";
+    const missing=(t&&loaded<t)?(t-loaded):0, showMissing=Boolean(t&&status!=="ok");
+
+    // Remove any existing overlay
+    closeQCOverlay();
+
+    // ── Inject overlay CSS once ──
+    if(!document.getElementById("mwl-qc-styles")){
+      const s=document.createElement("style");
+      s.id="mwl-qc-styles";
+      s.textContent=`
+        #mwl-qc-overlay{position:fixed;inset:0;z-index:99999;display:flex;flex-direction:column;background:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#0b0c0f;}
+        #mwl-qc-overlay *{box-sizing:border-box;}
+        .mwl-qc-bar{position:sticky;top:0;z-index:10;background:#07080a;color:#fff;padding:12px 16px 10px;border-bottom:1px solid rgba(255,255,255,.10);display:flex;flex-direction:column;gap:8px;flex-shrink:0;}
+        .mwl-qc-row1{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;}
+        .mwl-qc-left{display:flex;align-items:center;gap:12px;}
+        .mwl-qc-brand{font-weight:800;letter-spacing:.24em;font-size:12px;text-transform:uppercase;}
+        .mwl-qc-pill{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border-radius:999px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.08);color:#fff;white-space:nowrap;font-size:11px;}
+        .mwl-qc-pill-dot{width:8px;height:8px;border-radius:50%;background:#94a3b8;flex:0 0 8px;}
+        .mwl-qc-pill.ok .mwl-qc-pill-dot{background:rgb(16,185,129);}
+        .mwl-qc-pill.partial .mwl-qc-pill-dot{background:rgb(245,158,11);}
+        .mwl-qc-pill.low .mwl-qc-pill-dot{background:rgb(239,68,68);}
+        .mwl-qc-pill-count{font-weight:800;font-size:11.5px;}
+        .mwl-qc-pill-miss{margin-left:6px;font-size:10px;opacity:.72;letter-spacing:.12em;text-transform:uppercase;}
+        .mwl-qc-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+        .mwl-qc-btn{display:inline-flex;align-items:center;justify-content:center;height:30px;padding:0 12px;border-radius:999px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:#fff;font:800 11px sans-serif;letter-spacing:.14em;text-transform:uppercase;cursor:pointer;user-select:none;white-space:nowrap;}
+        .mwl-qc-btn:hover{background:rgba(255,255,255,.12);}
+        .mwl-qc-btn.on{background:rgba(255,255,255,.92);color:#07080a;border-color:rgba(255,255,255,.92);}
+        .mwl-qc-btn-close{width:32px;padding:0;font-size:16px;font-weight:900;}
+        .mwl-qc-btn-gold{border-color:#d8b46a;color:#d8b46a;}
+        .mwl-qc-btn-gold:hover{background:rgba(216,180,106,.12);}
+        .mwl-qc-btn-gold.has-sel{border-color:#d8b46a;color:#d8b46a;opacity:1;}
+        .mwl-qc-btn-gold[data-copied] .mwl-qc-sel-label{display:none;}
+        .mwl-qc-btn-gold[data-copied]::after{content:"Copied ✓";}
+        .mwl-qc-row2{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;}
+        .mwl-qc-channel{font-weight:700;font-size:11px;letter-spacing:.18em;text-transform:uppercase;opacity:.78;}
+        .mwl-qc-sep{opacity:.35;}
+        .mwl-qc-wl{font-size:14px;font-weight:650;opacity:.96;}
+        .mwl-qc-body{overflow-y:auto;flex:1;padding:16px 14px 32px;}
+        .mwl-qc-block{border-top:1px solid rgba(15,23,42,.12);padding-top:12px;margin-bottom:4px;}
+        .mwl-qc-vidrow{display:flex;align-items:center;gap:8px;margin-bottom:10px;}
+        .mwl-qc-vidlabel{font-size:12.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#111827;}
+        .mwl-qc-vidcb{width:15px;height:15px;cursor:pointer;accent-color:#d8b46a;flex:0 0 auto;}
+        .mwl-qc-row{display:flex;gap:10px;overflow-x:auto;padding-bottom:6px;}
+        .mwl-qc-tile{width:220px;flex:0 0 220px;border:1px solid rgba(15,23,42,.12);background:#fff;display:flex;flex-direction:column;}
+        .mwl-qc-imgwrap{position:relative;height:293px;background:#f8f8f8;cursor:zoom-in;overflow:hidden;}
+        .mwl-qc-imgwrap img{width:100%;height:100%;object-fit:cover;display:block;}
+        .mwl-qc-imgwrap img.ov{position:absolute;inset:0;object-fit:contain;pointer-events:none;opacity:.92;}
+        .mwl-qc-meta{padding:7px 10px;border-top:1px solid rgba(15,23,42,.12);font-size:10.5px;color:#6b7280;letter-spacing:.14em;text-transform:uppercase;}
+        .mwl-qc-refwrap{height:293px;background:#f8f8f8;overflow:hidden;}
+        .mwl-qc-refwrap img{width:100%;height:100%;object-fit:cover;display:block;}
+        .mwl-qc-lb{position:fixed;inset:0;background:rgba(7,8,10,.94);z-index:100010;display:none;align-items:center;justify-content:center;padding:24px;}
+        .mwl-qc-lb.open{display:flex;}
+        .mwl-qc-lb-inner{position:relative;width:min(1180px,calc(100vw - 48px));height:min(92vh,980px);display:flex;align-items:center;justify-content:center;}
+        .mwl-qc-lb-img{max-width:100%;max-height:100%;object-fit:contain;background:#0b0c0f;}
+        .mwl-qc-lb-x{position:absolute;top:-10px;right:-10px;width:40px;height:40px;border-radius:50%;border:1px solid rgba(255,255,255,.22);background:rgba(255,255,255,.06);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:18px;}
+        .mwl-qc-lb-nav{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:44px;border-radius:50%;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:20px;user-select:none;}
+        .mwl-qc-lb-prev{left:-14px;}
+        .mwl-qc-lb-next{right:-14px;}
+      `;
+      document.head.appendChild(s);
+    }
+
+    // ── Build overlay DOM ──
+    const overlay=document.createElement("div");
+    overlay.id=QC_OVERLAY_ID;
+
+    // Topbar
+    const bar=document.createElement("div"); bar.className="mwl-qc-bar";
+    const row1=document.createElement("div"); row1.className="mwl-qc-row1";
+
+    const leftRow=document.createElement("div"); leftRow.className="mwl-qc-left";
+    const brandEl=document.createElement("div"); brandEl.className="mwl-qc-brand"; brandEl.textContent="Quality Check";
+    const pillEl=document.createElement("div"); pillEl.className="mwl-qc-pill "+status;
+    pillEl.innerHTML='<span class="mwl-qc-pill-dot"></span>'
+      +'<span style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;opacity:.92;">Loaded</span>'
+      +'<span class="mwl-qc-pill-count">'+loaded+(t?" / "+t:"")+"</span>"
+      +(showMissing?'<span class="mwl-qc-pill-miss">Missing: '+missing+"</span>":"");
+    leftRow.appendChild(brandEl); leftRow.appendChild(pillEl);
+
+    const actions=document.createElement("div"); actions.className="mwl-qc-actions";
+
+    function mkBtn(id,label,extraClass){
+      const b=document.createElement("button");
+      b.className="mwl-qc-btn"+(extraClass?" "+extraClass:"");
+      b.id=id; b.innerHTML=label; return b;
+    }
+    const btnGuides=mkBtn("mwl-qc-guides","Check Guides");
+    const btnBrand=mkBtn("mwl-qc-brand-btn","Brand image");
+    const btnRefs=mkBtn("mwl-qc-refs","References");
+    const btnRefsClose=mkBtn("mwl-qc-refs-close","×","mwl-qc-btn-close"); btnRefsClose.style.display="none";
+    const btnCopySel=mkBtn("mwl-qc-copysel",'<span class="mwl-qc-sel-label">Copy selected </span><span id="mwl-qc-selcount"></span>',"mwl-qc-btn-gold");
+    btnCopySel.style.opacity="0.55";
+    const btnClose=mkBtn("mwl-qc-close","×","mwl-qc-btn-close"); btnClose.title="Close QC (Esc)";
+    [btnGuides,btnBrand,btnRefs,btnRefsClose,btnCopySel,btnClose].forEach(b=>actions.appendChild(b));
+
+    row1.appendChild(leftRow); row1.appendChild(actions); bar.appendChild(row1);
+
+    const row2=document.createElement("div"); row2.className="mwl-qc-row2";
+    if(channelRaw){const c=document.createElement("div");c.className="mwl-qc-channel";c.textContent=channelRaw;row2.appendChild(c);}
+    const sepEl=document.createElement("div"); sepEl.className="mwl-qc-sep"; sepEl.textContent="·";
+    const wlEl=document.createElement("div"); wlEl.className="mwl-qc-wl"; wlEl.textContent=wlName;
+    row2.appendChild(sepEl); row2.appendChild(wlEl); bar.appendChild(row2);
+    overlay.appendChild(bar);
+
+    // Body
+    const body=document.createElement("div"); body.className="mwl-qc-body"; body.id="mwl-qc-body";
+    overlay.appendChild(body);
+
+    // Lightbox
+    const lb=document.createElement("div"); lb.className="mwl-qc-lb"; lb.id="mwl-qc-lb";
+    const lbInner=document.createElement("div"); lbInner.className="mwl-qc-lb-inner";
+    const lbPrev=document.createElement("button"); lbPrev.className="mwl-qc-lb-nav mwl-qc-lb-prev"; lbPrev.innerHTML="‹";
+    const lbNext=document.createElement("button"); lbNext.className="mwl-qc-lb-nav mwl-qc-lb-next"; lbNext.innerHTML="›";
+    const lbX=document.createElement("button"); lbX.className="mwl-qc-lb-x"; lbX.innerHTML="×";
+    const lbImg=document.createElement("img"); lbImg.className="mwl-qc-lb-img"; lbImg.alt="QC preview";
+    [lbPrev,lbNext,lbX,lbImg].forEach(n=>lbInner.appendChild(n));
+    lb.appendChild(lbInner);
+    overlay.appendChild(lb);
+
+    document.body.appendChild(overlay);
+    document.body.style.overflow="hidden";
+
+    // ── JS logic (runs in main page context — cookies work) ──
+    const selectedVIDs=new Set();
+    let overlayOn=false, brandOn=false, refsOn=false, refIndex=0;
+    const RSK="mimo_qc_ref_index_v1";
+    const refs=REFERENCES[brandKey]||[];
+
+    function getRI(){try{const o=JSON.parse(localStorage.getItem(RSK)||"{}");const n=Number(o?.[brandKey]??0);return Number.isFinite(n)?n:0;}catch{return 0;}}
+    function setRI(i){try{const o=JSON.parse(localStorage.getItem(RSK)||"{}");o[brandKey]=i;localStorage.setItem(RSK,JSON.stringify(o));}catch{}}
+    function getARef(){if(!refs.length)return null;const i=((refIndex%refs.length)+refs.length)%refs.length;return{...refs[i],idx:i,total:refs.length};}
+
+    function updateSelBtn(){
+      const n=selectedVIDs.size;
+      btnCopySel.style.opacity=n>0?"1":"0.55";
+      btnCopySel.classList.toggle("has-sel",n>0);
+      const cnt=document.getElementById("mwl-qc-selcount");
+      if(cnt)cnt.textContent=n>0?"("+n+")":"";
+      btnCopySel.title=n>0?"Copy "+n+" VID(s)":"Select VIDs to copy";
+    }
+
+    // Lightbox
+    const NAV=[];
+    function buildNav(){
+      NAV.length=0;
+      for(const vid of data.vids){
+        const views=data.views.filter(v=>!(!brandOn&&v==="brand")&&data.map[vid][v]?.srcQC);
+        for(const view of views) NAV.push({vid,view,src:data.map[vid][view].srcQC});
+      }
+    }
+    let lbIdx=-1;
+    function openLB(i){buildNav();if(!NAV.length)return;lbIdx=(i+NAV.length)%NAV.length;lbImg.src=NAV[lbIdx].src;lb.classList.add("open");lb.setAttribute("aria-hidden","false");}
+    function closeLB(){lb.classList.remove("open");lb.setAttribute("aria-hidden","true");lbImg.src="";lbIdx=-1;}
+    lbX.addEventListener("click",closeLB);
+    lbPrev.addEventListener("click",()=>{if(lbIdx!==-1)openLB(lbIdx-1);});
+    lbNext.addEventListener("click",()=>{if(lbIdx!==-1)openLB(lbIdx+1);});
+    lb.addEventListener("click",e=>{if(e.target===lb)closeLB();});
+    lbImg.addEventListener("click",()=>{if(lbIdx!==-1)openLB(lbIdx+1);});
+
+    // Buttons
+    function syncBtns(){
+      btnGuides.classList.toggle("on",overlayOn);
+      btnBrand.classList.toggle("on",brandOn);
+      btnRefs.classList.toggle("on",refsOn);
+      btnRefsClose.style.display=refsOn?"inline-flex":"none";
+    }
+    btnClose.addEventListener("click",()=>{closeQCOverlay();});
+    btnGuides.addEventListener("click",()=>{overlayOn=!overlayOn;syncBtns();render();});
+    btnBrand.addEventListener("click",()=>{brandOn=!brandOn;syncBtns();render();});
+    btnRefs.addEventListener("click",()=>{
+      if(!refs.length)return;
+      if(!refsOn){refsOn=true;refIndex=getRI();}
+      else{refIndex=(refIndex+1)%refs.length;setRI(refIndex);}
+      syncBtns();render();
+    });
+    btnRefsClose.addEventListener("click",()=>{refsOn=false;syncBtns();render();});
+    btnCopySel.addEventListener("click",()=>{
+      if(!selectedVIDs.size)return;
+      const txt=[...selectedVIDs].join("\n");
+      try{navigator.clipboard.writeText(txt);}catch{
+        const ta=document.createElement("textarea");ta.value=txt;ta.style.cssText="position:fixed;left:-9999px";
+        document.body.appendChild(ta);ta.select();document.execCommand("copy");ta.remove();
+      }
+      btnCopySel.setAttribute("data-copied","1");
+      setTimeout(()=>{btnCopySel.removeAttribute("data-copied");updateSelBtn();},1400);
+    });
+
+    // Keyboard
+    function onKey(e){
+      if(e.key==="Escape"){if(lb.classList.contains("open"))closeLB();else closeQCOverlay();e.preventDefault();return;}
+      if(lb.classList.contains("open")){
+        if(e.key==="ArrowLeft"&&lbIdx!==-1)openLB(lbIdx-1);
+        if(e.key==="ArrowRight"&&lbIdx!==-1)openLB(lbIdx+1);
+      }
+      if(e.key==="g"||e.key==="G"){overlayOn=!overlayOn;syncBtns();render();}
+    }
+    overlay.addEventListener("keydown",onKey);
+    // Also catch keydown on window while overlay is open
+    function winKey(e){if(document.getElementById(QC_OVERLAY_ID))onKey(e);}
+    window.addEventListener("keydown",winKey);
+    // Clean up listener when overlay is removed
+    const mo=new MutationObserver(()=>{if(!document.getElementById(QC_OVERLAY_ID)){window.removeEventListener("keydown",winKey);mo.disconnect();}});
+    mo.observe(document.body,{childList:true});
+
+    // Render
+    function mkRef(aRef){
+      const tile=document.createElement("div"); tile.className="mwl-qc-tile";
+      const rw=document.createElement("div"); rw.className="mwl-qc-refwrap";
+      const img=document.createElement("img"); img.loading="lazy";
+      img.onerror=()=>{rw.style.cssText="height:293px;background:rgba(15,23,42,.04);display:flex;align-items:center;justify-content:center;padding:14px;color:rgba(15,23,42,.55);font:800 11px sans-serif;letter-spacing:.14em;text-transform:uppercase;";rw.textContent="Reference unavailable";};
+      img.src=aRef.url; rw.appendChild(img); tile.appendChild(rw);
+      const meta=document.createElement("div"); meta.className="mwl-qc-meta";
+      meta.textContent="model reference · "+aRef.name+" ("+(aRef.idx+1)+"/"+aRef.total+")";
+      tile.appendChild(meta); return tile;
+    }
+
+    function render(){
+      const gridEl=document.getElementById("mwl-qc-body");
+      while(gridEl.firstChild)gridEl.removeChild(gridEl.firstChild);
+      buildNav();
+      const aRef=refsOn?getARef():null;
+      for(const vid of data.vids){
+        const views=data.views.filter(v=>!(!brandOn&&v==="brand")&&data.map[vid][v]?.srcQC);
+        if(!views.length)continue;
+        const block=document.createElement("div"); block.className="mwl-qc-block";
+
+        // VID header with checkbox
+        const vidRow=document.createElement("div"); vidRow.className="mwl-qc-vidrow";
+        const cb=document.createElement("input"); cb.type="checkbox"; cb.className="mwl-qc-vidcb";
+        cb.checked=selectedVIDs.has(vid);
+        cb.addEventListener("change",()=>{if(cb.checked)selectedVIDs.add(vid);else selectedVIDs.delete(vid);updateSelBtn();});
+        const vidLabel=document.createElement("div"); vidLabel.className="mwl-qc-vidlabel"; vidLabel.textContent=vid;
+        vidRow.appendChild(cb); vidRow.appendChild(vidLabel); block.appendChild(vidRow);
+
+        const row=document.createElement("div"); row.className="mwl-qc-row";
+        let refInserted=false;
+
+        for(const view of views){
+          const cell=data.map[vid][view]; if(!cell?.srcQC)continue;
+          const tile=document.createElement("div"); tile.className="mwl-qc-tile";
+          const iw=document.createElement("div"); iw.className="mwl-qc-imgwrap";
+          const img=document.createElement("img"); img.loading="lazy"; img.src=cell.srcQC;
+          iw.appendChild(img);
+
+          // Guide overlay
+          if(overlayOn&&OVERLAY_VIEWS.has(view)){
+            const ov=document.createElement("img"); ov.className="ov"; ov.alt="";
+            ov.src=OVERLAY_SP_URL; iw.appendChild(ov);
+          }
+
+          // Click to open lightbox
+          const navIdx=NAV.findIndex(x=>x.vid===vid&&x.view===view);
+          iw.addEventListener("click",()=>openLB(navIdx>=0?navIdx:0));
+          tile.appendChild(iw);
+
+          const meta=document.createElement("div"); meta.className="mwl-qc-meta";
+          meta.textContent=view==="brand"?"brand image":view;
+          tile.appendChild(meta); row.appendChild(tile);
+
+          if(aRef&&!refInserted&&view==="ou"){refInserted=true;row.appendChild(mkRef(aRef));}
+        }
+        if(aRef&&!refInserted)row.appendChild(mkRef(aRef));
+        if(row.children.length){block.appendChild(row);gridEl.appendChild(block);}
+      }
+    }
+
+    refIndex=getRI(); syncBtns(); updateSelBtn(); render();
   }
+
 
   // ═══════════════════════════════════════
-  // Styles — injected BEFORE panel creation
-  // so no flash of unstyled content
+  // Styles
   // ═══════════════════════════════════════
   let stylesInjected=false;
   function ensureStyles(){
     if(stylesInjected)return; stylesInjected=true;
     GM_addStyle(`
-      /* ── CSS custom props ── */
       :root {
         --mwl-bg:    rgba(15,15,19,0.98);
         --mwl-bg2:   rgba(21,21,27,0.98);
@@ -527,7 +902,6 @@
         --mwl-font:  ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
       }
 
-      /* ── Panel: hidden by default, shown only when embedded ── */
       #mwl-panel {
         display: none;
         font-family: var(--mwl-font);
@@ -536,10 +910,8 @@
         background: linear-gradient(160deg, var(--mwl-bg), var(--mwl-bg2));
         border-radius: var(--mwl-r);
         margin: 0;
-        z-index: 200;
-        /* Position is set inline by JS after mount */
+        /* z-index set inline by applyFixedGeometry / initFloatingPanel */
       }
-      /* Force overflow visible so fixed children are not clipped */
       .MuiBox-root:has(#mwl-panel),
       .MuiPaper-root:has(#mwl-panel) {
         overflow: visible !important;
@@ -548,24 +920,20 @@
       #mwl-panel.mwl-minimized .mwl-drawer,
       #mwl-panel.mwl-minimized .mwl-strip-bottom { display: none !important; }
 
-      /* ── Floating panel (search mode) ── */
       #mwl-panel.mwl-floating {
         box-shadow: 0 8px 32px rgba(0,0,0,0.45), 0 2px 8px rgba(0,0,0,0.28);
         border: 1px solid rgba(255,255,255,0.10);
-        position: fixed !important;  /* overrides any inline reset */
-        /* position:relative for the resize handle is set on the element itself */
+        position: fixed !important;
       }
       #mwl-panel.mwl-floating .mwl-strip { cursor: grab; user-select: none; }
       #mwl-panel.mwl-floating .mwl-strip:active { cursor: grabbing; }
 
-      /* Resize handle — bottom-right corner */
       #mwl-resize-handle {
         position: absolute;
         bottom: 0; right: 0;
         width: 16px; height: 16px;
         cursor: se-resize;
         z-index: 10;
-        /* Subtle visual cue */
         background: linear-gradient(135deg, transparent 50%, rgba(255,255,255,0.15) 50%);
         border-radius: 0 0 var(--mwl-r) 0;
       }
@@ -573,7 +941,6 @@
         background: linear-gradient(135deg, transparent 50%, rgba(255,255,255,0.30) 50%);
       }
 
-      /* Reset position button — only shown in floating mode */
       #mwl-float-reset {
         display: none;
         border: 1px solid rgba(255,255,255,0.10);
@@ -587,26 +954,24 @@
       #mwl-panel.mwl-floating #mwl-float-reset { display: inline-flex; align-items: center; }
       #mwl-float-reset:hover { background: rgba(255,255,255,0.09); color: rgba(255,255,255,0.80); }
 
-      /* ════════════════════════════
-         STRIP (always-visible top row)
-      ════════════════════════════ */
       .mwl-strip {
         display: flex;
         align-items: center;
         gap: 10px;
         padding: 8px 10px;
         flex-wrap: nowrap;
-        overflow: hidden;
+        overflow-x: auto;
+        scrollbar-width: none; /* Firefox */
+        -ms-overflow-style: none; /* IE/Edge */
       }
+      .mwl-strip::-webkit-scrollbar { display: none; } /* Chrome/Safari */
 
-      /* status dot (per-group, small) */
       .mwl-dot {
         width: 6px; height: 6px; border-radius: 99px; flex: 0 0 6px;
         background: var(--mwl-amber);
         transition: background .3s ease;
       }
 
-      /* ── Progress group (label + bar + pct + num) ── */
       .mwl-prog {
         display: flex;
         align-items: center;
@@ -626,7 +991,6 @@
         background: linear-gradient(90deg, rgba(216,180,106,0.85), rgba(255,255,255,0.50));
         border-radius: 99px; transition: width .45s ease;
       }
-      /* pct and num — small gap between them, both fixed-width, tabular nums */
       .mwl-prog-pct {
         font-size: 9.5px; font-weight: 800;
         color: rgba(255,255,255,0.46); flex: 0 0 auto; white-space: nowrap;
@@ -640,10 +1004,9 @@
         font-variant-numeric: tabular-nums;
         width: 7ch; text-align: left;
         display: inline-block;
-        margin-left: 4px;   /* breathing room between % and shots/total */
+        margin-left: 4px;
       }
 
-      /* Missing pill — wider padding so text never clips */
       #mwl-missing-pill {
         display: inline-flex; align-items: center; gap: 4px;
         padding: 3px 10px; border-radius: 999px;
@@ -657,17 +1020,29 @@
         white-space: nowrap;
         font-variant-numeric: tabular-nums;
       }
+      /* label part — muted */
+      #mwl-missing-pill .mwl-pill-label {
+        font-weight: 700;
+        opacity: 0.65;
+        font-size: 9px;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+      }
+      /* count part — prominent */
+      #mwl-missing-pill .mwl-mc {
+        font-weight: 900;
+        font-size: 11px;
+        color: inherit;
+      }
 
-      /* KPI inline — fixed so RTW/ACC values don't shift neighbours */
       .mwl-kpi-inline {
         display: flex; align-items: center; gap: 4px; flex: 0 0 auto;
-        width: 10ch; /* "RTW 999 · ACC 999" shrunk fits */
+        width: 10ch;
       }
       .mwl-prog-sep {
         width: 1px; height: 11px; background: rgba(255,255,255,0.10); flex: 0 0 1px;
       }
 
-      /* ── Clickable progress pill (Still Life / Model) ── */
       .mwl-prog-clickable {
         cursor: pointer;
         border-radius: 6px;
@@ -679,7 +1054,6 @@
       .mwl-prog-clickable.is-active { background: rgba(216,180,106,0.09); }
       .mwl-prog-clickable.is-active .mwl-prog-lbl { color: var(--mwl-gold); }
 
-      /* ── Inline KPI (RTW / ACC) labels and values ── */
       .mwl-kpi-lbl {
         font-size: 9px; font-weight: 800; letter-spacing: .10em; text-transform: uppercase;
         color: var(--mwl-sub);
@@ -692,10 +1066,8 @@
         font-size: 9px; color: rgba(255,255,255,0.20); margin: 0 1px;
       }
 
-      /* ── 2-col drawer grid ── */
       .mwl-dcols-2 { grid-template-columns: 1fr 1fr !important; }
 
-      /* ── Horizontal pill row inside drawer ── */
       .mwl-pill-row {
         display: flex;
         flex-wrap: wrap;
@@ -703,15 +1075,12 @@
         margin-top: 3px;
       }
 
-      /* ── Next button with integrated ptr ── */
       #mwl-next-btn {
         font-variant-numeric: tabular-nums;
         min-width: 0;
         white-space: nowrap;
         letter-spacing: .02em;
       }
-
-      /* ── Next button: two-span stable layout ── */
       #mwl-next-btn { display: flex; align-items: center; justify-content: center; gap: 6px; }
       .mwl-next-label { flex: 0 0 auto; }
       .mwl-next-ptr {
@@ -722,10 +1091,8 @@
         letter-spacing: .02em;
       }
 
-      /* ── Missing pill label span ── */
       .mwl-pill-label { flex: 0 0 auto; }
 
-      /* ── Strip: prevent any group from shrinking on narrow viewports ── */
       .mwl-prog, .mwl-prog-sep, .mwl-kpi-inline, #mwl-status-chip,
       #mwl-missing-pill, .mwl-strip-actions { flex-shrink: 0; }
       #mwl-missing-pill:hover { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.88); }
@@ -735,36 +1102,19 @@
         color: rgba(255,200,200,0.88);
       }
       #mwl-missing-pill.has-items:hover { background: rgba(255,93,93,0.14); }
-      #mwl-missing-pill .mwl-mc { font-weight: 900; }
 
-      /* ── Status chip — leftmost ── */
       #mwl-status-chip {
         font-size: 9.5px; font-weight: 800; letter-spacing: .06em;
-        white-space: nowrap; flex: 0 0 auto;
+        white-space: nowrap; flex: 0 0 15ch;
+        width: 15ch;
         color: var(--mwl-amber);
         transition: color .3s;
-        width: 13ch;            /* "In progress · 99%" = worst case ~13ch */
         display: inline-block;
         font-variant-numeric: tabular-nums;
         overflow: hidden;
+        text-overflow: ellipsis;
       }
 
-      /* ── Load chip — sits next to ⇣ inside strip-actions ── */
-      #mwl-loadchip {
-        display: none;
-        align-items: center;
-        font-size: 9px; font-weight: 800;
-        padding: 2px 6px; border-radius: 999px;
-        border: 1px solid rgba(255,255,255,0.12);
-        background: rgba(255,255,255,0.05);
-        color: rgba(255,255,255,0.58);
-        white-space: nowrap; flex: 0 0 auto;
-        font-variant-numeric: tabular-nums;
-      }
-      #mwl-loadchip.is-amber { border-color: rgba(255,204,102,0.38); background: rgba(255,204,102,0.10); color: rgba(255,240,200,0.88); }
-      #mwl-loadchip.is-red   { border-color: rgba(255,93,93,0.28);   background: rgba(255,93,93,0.10);   color: rgba(255,210,210,0.88); }
-
-      /* ── Action buttons ── */
       .mwl-strip-actions {
         display: flex; align-items: center; gap: 3px; flex: 0 0 auto; margin-left: auto;
       }
@@ -778,12 +1128,44 @@
         transition: background .10s, color .10s, border-color .10s;
       }
       .mwl-abtn:hover { background: rgba(255,255,255,0.09); color: rgba(255,255,255,0.92); border-color: rgba(255,255,255,0.18); }
-      /* load button with fused counter */
-      #mwl-loadall-btn { font-variant-numeric: tabular-nums; min-width: 2ch; }
-      #mwl-loadall-btn.is-loading-amber { border-color: rgba(255,204,102,0.38); background: rgba(255,204,102,0.10); color: rgba(255,240,200,0.90); }
-      #mwl-loadall-btn.is-loading-red   { border-color: rgba(255,93,93,0.30);   background: rgba(255,93,93,0.10);   color: rgba(255,210,210,0.90); }
 
-      /* expand toggle */
+      /* [MOD 1] Load button */
+      #mwl-loadall-btn { font-variant-numeric: tabular-nums; min-width: 2ch; }
+      /* needs-run: shown at mount to prompt the user to click ⇣ first */
+      #mwl-loadall-btn.needs-run {
+        border-color: rgba(216,180,106,0.65) !important;
+        background: rgba(216,180,106,0.14) !important;
+        color: var(--mwl-gold) !important;
+        box-shadow: 0 0 0 1px rgba(216,180,106,0.18);
+      }
+      /* is-loading: shown when scroll is in progress or variants still missing */
+      #mwl-loadall-btn.is-loading-amber {
+        border-color: rgba(255,204,102,0.70) !important;
+        background: rgba(255,204,102,0.18) !important;
+        color: #ffe066 !important;
+        box-shadow: 0 0 0 1px rgba(255,204,102,0.22);
+      }
+      #mwl-loadall-btn.is-loading-red {
+        border-color: rgba(255,80,80,0.80) !important;
+        background: rgba(255,80,80,0.18) !important;
+        color: #ff7070 !important;
+        box-shadow: 0 0 0 1px rgba(255,80,80,0.22);
+      }
+      #mwl-loadall-btn:disabled { opacity: 0.70; }
+
+      /* [MOD 2] Quality Check button — luxury gold outline */
+      .mwl-abtn-qc {
+        border-color: rgba(216,180,106,0.45) !important;
+        color: var(--mwl-gold) !important;
+        letter-spacing: .05em;
+        font-size: 9.5px;
+      }
+      .mwl-abtn-qc:hover {
+        background: rgba(216,180,106,0.10) !important;
+        border-color: rgba(216,180,106,0.70) !important;
+        color: #e8c97a !important;
+      }
+
       #mwl-expand-btn {
         border: 1px solid rgba(255,255,255,0.10);
         background: rgba(255,255,255,0.04);
@@ -800,7 +1182,6 @@
         color: var(--mwl-gold);
       }
 
-      /* minimize button */
       #mwl-min-btn {
         border: 1px solid rgba(255,255,255,0.10);
         background: rgba(255,255,255,0.04);
@@ -812,7 +1193,6 @@
       }
       #mwl-min-btn:hover { background: rgba(255,93,93,0.10); color: rgba(255,180,180,0.90); border-color: rgba(255,93,93,0.24); }
 
-      /* restore bar (shown when minimized) */
       #mwl-restore-bar {
         display: none;
         align-items: center;
@@ -824,12 +1204,10 @@
       #mwl-panel.mwl-minimized #mwl-restore-bar { display: flex; }
       #mwl-panel.mwl-minimized .mwl-strip { display: none; }
 
-      /* Minimized: white compact pill, right-aligned in flow */
       #mwl-panel.mwl-minimized {
         background: rgba(255,255,255,0.96) !important;
         box-shadow: 0 1px 4px rgba(0,0,0,0.08) !important;
         border-radius: 8px !important;
-        /* Shrink to pill size and push to the right of its container */
         width: auto !important;
         margin-left: auto !important;
         display: block;
@@ -838,31 +1216,18 @@
         padding: 5px 12px;
         white-space: nowrap;
       }
-      #mwl-panel.mwl-minimized .mwl-restore-label {
-        color: rgba(0,0,0,0.38);
-      }
-      #mwl-panel.mwl-minimized .mwl-restore-chev {
-        color: rgba(0,0,0,0.22);
-      }
-      #mwl-panel.mwl-minimized:hover {
-        box-shadow: 0 2px 8px rgba(0,0,0,0.12) !important;
-      }
-      #mwl-panel.mwl-minimized #mwl-restore-bar:hover .mwl-restore-label {
-        color: rgba(0,0,0,0.65);
-      }
+      #mwl-panel.mwl-minimized .mwl-restore-label { color: rgba(0,0,0,0.38); }
+      #mwl-panel.mwl-minimized .mwl-restore-chev  { color: rgba(0,0,0,0.22); }
+      #mwl-panel.mwl-minimized:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.12) !important; }
+      #mwl-panel.mwl-minimized #mwl-restore-bar:hover .mwl-restore-label { color: rgba(0,0,0,0.65); }
 
       .mwl-restore-label {
         font-size: 10px; font-weight: 800; letter-spacing: .10em; text-transform: uppercase;
         color: rgba(255,255,255,0.50);
       }
-      .mwl-restore-chev {
-        font-size: 11px; color: rgba(255,255,255,0.35);
-      }
+      .mwl-restore-chev { font-size: 11px; color: rgba(255,255,255,0.35); }
       #mwl-restore-bar:hover .mwl-restore-label { color: rgba(255,255,255,0.80); }
 
-      /* ════════════════════════════
-         DRAWER (collapsible)
-      ════════════════════════════ */
       .mwl-drawer {
         display: none;
         border-top: 1px solid rgba(255,255,255,0.06);
@@ -870,7 +1235,6 @@
       }
       .mwl-drawer.open { display: block; }
 
-      /* 3-column grid */
       .mwl-dcols {
         display: grid;
         grid-template-columns: 1fr 1fr 1fr;
@@ -883,7 +1247,6 @@
         color: var(--mwl-sub); margin-bottom: 2px;
       }
 
-      /* pills */
       .mwl-pill {
         display: inline-flex; align-items: center; gap: 5px;
         padding: 3px 8px; border-radius: 999px;
@@ -899,14 +1262,12 @@
       .mwl-pill.is-alert  { border-color: rgba(255,204,102,0.35); background: rgba(255,204,102,0.07); }
       .mwl-pill .mwl-count { font-weight: 900; color: rgba(255,255,255,0.88); }
 
-      /* KPI rows */
       .mwl-krow {
         display: flex; align-items: center; justify-content: space-between;
         font-size: 10px; color: var(--mwl-sub); padding: 1px 0;
       }
       .mwl-krow strong { font-weight: 900; color: rgba(255,255,255,0.82); }
 
-      /* drawer footer: copy buttons + ptr */
       .mwl-dfooter {
         display: flex; align-items: center; gap: 5px;
         padding-top: 7px;
@@ -923,11 +1284,17 @@
       .mwl-dbtn:hover { background: rgba(255,255,255,0.09); color: rgba(255,255,255,0.92); }
       .mwl-dbtn.gold { border-color: rgba(216,180,106,0.35); background: rgba(216,180,106,0.08); color: var(--mwl-gold); }
       .mwl-dbtn.gold:hover { background: rgba(216,180,106,0.15); }
+      /* Copy All is a bulk action — less visual weight than Copy Missing */
+      .mwl-dbtn.secondary {
+        flex: 0 0 auto;
+        font-size: 9px; letter-spacing: .06em;
+        color: rgba(255,255,255,0.35);
+        border-color: transparent;
+        background: transparent;
+      }
+      .mwl-dbtn.secondary:hover { color: rgba(255,255,255,0.65); background: rgba(255,255,255,0.05); border-color: var(--mwl-brd2); }
       #mwl-focus-ptr { font-size: 9.5px; color: var(--mwl-dim); white-space: nowrap; margin-left: auto; padding-left: 4px; }
 
-      /* ════════════════════════════
-         OVERLAYS (settings/help)
-      ════════════════════════════ */
       .mwl-overlay {
         position: relative;
         border-top: 1px solid rgba(255,255,255,0.07);
@@ -947,9 +1314,31 @@
       }
       .mwl-obtn:hover { background: rgba(255,255,255,0.10); color: rgba(255,255,255,0.95); }
 
-      /* ════════════════════════════
-         HIGHLIGHTS + TOAST
-      ════════════════════════════ */
+      /* Shortcut grid: 2-col key → description */
+      .mwl-help-grid {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 5px 10px;
+        align-items: center;
+      }
+      .mwl-help-grid kbd {
+        display: inline-flex; align-items: center; justify-content: center;
+        min-width: 22px; padding: 1px 5px;
+        border: 1px solid rgba(255,255,255,0.20);
+        border-bottom-width: 2px;
+        border-radius: 4px;
+        background: rgba(255,255,255,0.07);
+        color: rgba(255,255,255,0.82);
+        font: 800 10px var(--mwl-font);
+        letter-spacing: .04em;
+        font-family: inherit;
+      }
+      .mwl-help-grid span {
+        font-size: 11px;
+        color: rgba(255,255,255,0.60);
+        line-height: 1.4;
+      }
+
       [data-mwl-nophoto="1"] { outline: none !important; border: none !important; position: relative; border-radius: 12px; background: rgba(198,22,22,0.16) !important; box-shadow: inset 0 0 0 1px rgba(198,22,22,0.18) !important; }
       [data-mwl-nophoto="1"]::before { content:""; position:absolute; left:0; top:8px; bottom:8px; width:4px; border-radius:999px; background:rgba(198,22,22,0.95); pointer-events:none; }
       [data-mwl-next="1"] { box-shadow: inset 0 0 0 1px rgba(216,180,106,0.35), 0 0 0 3px rgba(216,180,106,0.50), 0 8px 24px rgba(216,180,106,0.24) !important; }
@@ -962,10 +1351,7 @@
   }
 
   // ═══════════════════════════════════════
-  // Embedded anchor
-  // ═══════════════════════════════════════
-  // ═══════════════════════════════════════
-  // Geometry — worklist: fixed+anchor / search: draggable float
+  // Geometry
   // ═══════════════════════════════════════
   let _fixedPlaceholder=null;
   let _resizeObserver=null;
@@ -975,7 +1361,6 @@
   function loadFloatPos(){ try{ return JSON.parse(localStorage.getItem(FLOAT_KEY)||"null"); }catch{return null;} }
   function saveFloatPos(x,y,w){ try{ localStorage.setItem(FLOAT_KEY,JSON.stringify({x,y,w})); }catch{} }
 
-  // ── Worklist: fixed, geometry derived from anchor at mount ──
   function getAppHeaderBottom(){
     let h=0;
     for(const el of document.querySelectorAll("header.MuiAppBar-root,header[class*='MuiAppBar']")){
@@ -998,8 +1383,6 @@
       margin:0!important;
       display:block;
     `;
-    // Placeholder reserves the panel's visual space in the flow so
-    // products don't start immediately under the Filters box
     if(!_fixedPlaceholder){
       _fixedPlaceholder=document.createElement("div");
       _fixedPlaceholder.id="mwl-placeholder";
@@ -1010,8 +1393,7 @@
   }
 
   function startGeometrySync(panel,anchor){
-    applyFixedGeometry(panel,anchor); // sync, before first paint
-    // Update on scroll so panel follows Filters as page scrolls
+    applyFixedGeometry(panel,anchor);
     _scrollHandler=()=>applyFixedGeometry(panel,anchor);
     if(_resizeObserver)_resizeObserver.disconnect();
     _resizeObserver=new ResizeObserver(()=>applyFixedGeometry(panel,anchor));
@@ -1019,7 +1401,6 @@
   }
 
   function stopGeometrySync(){
-    // _scrollHandler is called by _onScroll, not registered directly on window
     _scrollHandler=null;
     if(_resizeObserver){_resizeObserver.disconnect();_resizeObserver=null;}
     if(_fixedPlaceholder){_fixedPlaceholder.remove();_fixedPlaceholder=null;}
@@ -1027,8 +1408,6 @@
     _floatListeners=[];
   }
 
-  // ── Search: draggable + resizable floating panel ──
-  // Listeners are stored so stopGeometrySync can remove them
   let _floatListeners=[];
   function _addFloatListener(target,type,fn,opts){
     target.addEventListener(type,fn,opts);
@@ -1036,7 +1415,6 @@
   }
 
   function initFloatingPanel(panel){
-    // Clean up any previous float listeners before re-initialising
     _floatListeners.forEach(({target,type,fn})=>target.removeEventListener(type,fn));
     _floatListeners=[];
 
@@ -1063,7 +1441,6 @@
 
     applyPos(X,Y,W);
 
-    // Drag handle = strip
     const strip=panel.querySelector(".mwl-strip");
     if(strip){
       strip.style.cursor="grab";
@@ -1087,8 +1464,6 @@
       _addFloatListener(window,"mouseup",onDragUp);
     }
 
-    // Resize handle — bottom-right corner
-    // Remove existing handle if re-initialising
     panel.querySelector("#mwl-resize-handle")?.remove();
     const resizeHandle=document.createElement("div");
     resizeHandle.id="mwl-resize-handle";
@@ -1108,7 +1483,6 @@
     _addFloatListener(window,"mousemove",onResizeMove);
     _addFloatListener(window,"mouseup",onResizeUp);
 
-    // Clamp on window resize
     const onWinResize=()=>{
       const r=panel.getBoundingClientRect();
       applyPos(r.left,r.top,panel.offsetWidth);
@@ -1116,7 +1490,6 @@
     _addFloatListener(window,"resize",onWinResize,{passive:true});
   }
 
-  // ── Anchor finders ──
   function findAnchor(){
     const signals=["Filters (","Select all","Exclude Videos","Variants","Brands","Categories","Tags","Status"];
     for(const c of document.querySelectorAll(".MuiPaper-root")){
@@ -1139,7 +1512,6 @@
     const all=document.querySelectorAll(`#${PANEL_ID}`);
     if(all.length>1){all.forEach(p=>{if(p!==panel)p.remove();});return false;}
     if(isSearchRoute())return panel.parentNode===document.body&&panel.classList.contains("mwl-floating");
-    // Worklist: panel on body, anchor still present
     return panel.parentNode===document.body&&!!findAnchor();
   }
 
@@ -1161,10 +1533,8 @@
       requestAnimationFrame(()=>{ if(mounted&&isSupportedRoute())mountPanel(panel); });
       return;
     }
-    // Panel lives on body as fixed element — no in-flow space, no layout interference
     if(!document.body.contains(panel))document.body.appendChild(panel);
     panel.classList.remove("mwl-floating");
-    // Apply geometry synchronously so panel appears in correct position from frame 0
     applyFixedGeometry(panel,anchor);
     panel.classList.add("mwl-visible");
     startGeometrySync(panel,anchor);
@@ -1174,27 +1544,19 @@
   // Panel construction
   // ═══════════════════════════════════════
   function buildPanel(){
-    // Inject styles synchronously before inserting any DOM
     ensureStyles();
-
     const panel=el("div",{id:PANEL_ID});
 
-    // ── Restore bar (visible only when minimized) ──
     const restoreBar=el("div",{id:"mwl-restore-bar",title:"Click to expand"},[
       el("span",{class:"mwl-restore-label"},["Dashboard — click to expand"]),
       el("span",{class:"mwl-restore-chev"},["▾"]),
     ]);
     restoreBar.addEventListener("click",()=>setMinimized(false));
 
-    // ── Strip (always visible when not minimized) ──
     const strip=el("div",{class:"mwl-strip"},[
-
-      // Status chip — leftmost
       el("span",{id:"mwl-status-chip"},["—"]),
-
       el("div",{class:"mwl-prog-sep"}),
 
-      // Still Life — dot + bar + pct + num, clickable
       el("div",{class:"mwl-prog mwl-prog-clickable","data-action":"focusIn","data-ui-key":"focus:inToShoot",title:"Still Life to shoot — click to jump to next"},[
         el("span",{class:"mwl-dot mwl-dot-sl",id:"mwl-dot-sl"}),
         el("span",{class:"mwl-prog-lbl"},["Still Life"]),
@@ -1205,7 +1567,6 @@
 
       el("div",{class:"mwl-prog-sep"}),
 
-      // Model — dot + bar + pct + num, clickable
       el("div",{class:"mwl-prog mwl-prog-clickable","data-action":"focusOu","data-ui-key":"focus:ouToShoot",title:"Model to shoot — click to jump to next"},[
         el("span",{class:"mwl-dot mwl-dot-mo",id:"mwl-dot-mo"}),
         el("span",{class:"mwl-prog-lbl"},["Model"]),
@@ -1216,7 +1577,6 @@
 
       el("div",{class:"mwl-prog-sep"}),
 
-      // Missing pill
       el("div",{id:"mwl-missing-pill","data-action":"next",title:"Missing — click to jump to next"},[
         el("span",{class:"mwl-pill-label"},["Missing "]),
         el("span",{class:"mwl-mc",id:"mwl-focus-missing"},["0"])
@@ -1224,7 +1584,6 @@
 
       el("div",{class:"mwl-prog-sep"}),
 
-      // RTW / ACC inline KPI
       el("div",{class:"mwl-kpi-inline"},[
         el("span",{class:"mwl-kpi-lbl"},["RTW"]),
         el("span",{class:"mwl-kpi-val",id:"mwl-cat-rtw"},["0"]),
@@ -1233,20 +1592,19 @@
         el("span",{class:"mwl-kpi-val",id:"mwl-cat-acc"},["0"]),
       ]),
 
-      // Right actions — load count fused into ⇣ button
       el("div",{class:"mwl-strip-actions"},[
-        el("button",{class:"mwl-abtn","data-action":"loadAll",id:"mwl-loadall-btn",title:"Force load all (ESC cancels)"},["⇣"]),
-        el("button",{class:"mwl-abtn","data-action":"qcOpen",title:"Open QC Carousel"},["QC"]),
+        el("button",{class:"mwl-abtn","data-action":"loadAll",id:"mwl-loadall-btn",title:"Force load all — run this first (ESC cancels)"},["⇣"]),
+        // [MOD 2] QC button with luxury gold styling and explicit label
+        el("button",{class:"mwl-abtn mwl-abtn-qc","data-action":"qcOpen",title:"Open Quality Check Carousel"},["Quality Check"]),
         el("button",{id:"mwl-float-reset","data-action":"floatReset",title:"Reset panel position"},["⊹"]),
         el("button",{id:"mwl-expand-btn",title:"More"},["▾"]),
         el("button",{id:"mwl-min-btn",title:"Minimize"},["−"]),
       ]),
     ]);
 
-    // ── Drawer ──
     const drawer=el("div",{class:"mwl-drawer"},[
       el("div",{class:"mwl-dcols mwl-dcols-2"},[
-        // Col 1 — Tags (horizontal)
+        // Col 1 — Tags
         el("div",{class:"mwl-dcol"},[
           el("div",{class:"mwl-dcol-title"},["Tags"]),
           el("div",{class:"mwl-pill-row"},[
@@ -1255,35 +1613,43 @@
             el("div",{class:"mwl-pill","data-action":"tagfocus","data-tag":"MODEL SIZE UNAVAILABLE","data-ui-key":"tag:MODEL SIZE UNAVAILABLE"},["MODEL SIZE ",el("span",{class:"mwl-count",id:"mwl-tag-modelsize"},["0"])]),
           ]),
         ]),
-        // Col 2 — Focus (horizontal)
+        // Col 2 — Focus (with [MOD 5] No shots pill)
         el("div",{class:"mwl-dcol"},[
           el("div",{class:"mwl-dcol-title"},["Focus"]),
           el("div",{class:"mwl-pill-row"},[
             el("div",{class:"mwl-pill","data-action":"setfocus","data-focus":"rtwVideoMissing","data-ui-key":"focus:rtwVideoMissing"},["RTW VIDEO ",el("span",{class:"mwl-count",id:"mwl-focus-rtwvideo"},["0"])]),
             el("div",{class:"mwl-pill","data-action":"setfocus","data-focus":"rejected","data-ui-key":"focus:rejected"},["Rejected ",el("span",{class:"mwl-count",id:"mwl-focus-rej"},["0"])]),
+            // [MOD 5] No shots uploaded pill — navigable focus
+            el("div",{class:"mwl-pill","data-action":"setfocus","data-focus":"noShots","data-ui-key":"focus:noShots",title:"VIDs with slots defined but zero shots uploaded — click to jump, Shift+click to copy"},[
+              "VID without shots ",
+              el("span",{class:"mwl-count",id:"mwl-focus-noshots"},["0"])
+            ]),
           ]),
         ]),
       ]),
-      // Footer — Next integra il ptr
       el("div",{class:"mwl-dfooter"},[
         el("div",{class:"mwl-dbtn gold","data-action":"next",id:"mwl-next-btn"},[
           el("span",{class:"mwl-next-label"},["Next ↓"]),
           el("span",{class:"mwl-next-ptr",id:"mwl-next-ptr"},["0 / 0"]),
         ]),
         el("div",{class:"mwl-dbtn","data-action":"copyMissing"},["Copy Missing"]),
-        el("div",{class:"mwl-dbtn","data-action":"copyAll"},["Copy All"]),
+        el("div",{class:"mwl-dbtn secondary","data-action":"copyAll"},["Copy All"]),
       ]),
     ]);
 
-    // ── Help overlay ──
     const helpOv=el("div",{class:"mwl-overlay",id:"mwl-help"},[
       el("div",{class:"mwl-ov-head"},[
-        el("span",{class:"mwl-ov-title"},["Shortcuts"]),
+        el("span",{class:"mwl-ov-title"},["Keyboard shortcuts"]),
         el("button",{class:"mwl-obtn","data-action":"closeHelp"},["Close"]),
       ]),
       el("div",{class:"mwl-ov-box"},[
-        el("div",{style:{color:"rgba(255,255,255,0.78)",fontSize:"11px",lineHeight:"1.6"}},
-          ["N = Next  •  A = Copy all  •  Q = QC  •  H = Help  •  ESC = stop Load All"])
+        el("div",{class:"mwl-help-grid"},[
+          el("kbd",{},"N"), el("span",{},"Next item"),
+          el("kbd",{},"A"), el("span",{},"Copy all VIDs"),
+          el("kbd",{},"Q"), el("span",{},"Open Quality Check"),
+          el("kbd",{},"H"), el("span",{},"Toggle this panel"),
+          el("kbd",{},"Esc"), el("span",{},"Stop Load All"),
+        ]),
       ]),
     ]);
 
@@ -1292,31 +1658,29 @@
     panel.appendChild(drawer);
     panel.appendChild(helpOv);
 
-    // ── Expand button ──
     strip.querySelector("#mwl-expand-btn").addEventListener("click",()=>setDrawerOpen(!bannerExpanded));
-
-    // ── Minimize button ──
     strip.querySelector("#mwl-min-btn").addEventListener("click",()=>setMinimized(true));
 
-    // ── Unified click handler ──
     panel.addEventListener("click",async(e)=>{
       const aEl=e.target.closest("[data-action]"); if(!aEl)return;
       const action=aEl.getAttribute("data-action");
 
       if(action==="loadAll"){
-        const btn=aEl; btn.disabled=true;
-        btn.textContent="⇣ 0%"; btn.classList.remove("is-loading-red","is-loading-amber");
+        const btn=aEl;
+        btn.dataset.ran="1";
+        btn.disabled=true;
+        btn.innerHTML="⇣ 0%";
+        btn.style.cssText="";
         try{
           toast("Load All: scrolling… (ESC stop)");
-          await window.MadameUtils.forceLoadAllBalanced({maxLoops:700,onProgress:({percent})=>{btn.textContent=`⇣ ${percent}%`;}});
-          toast("Load All: done."); updateCounts(false);
+          await window.MadameUtils.forceLoadAllBalanced({maxLoops:900,onProgress:({percent})=>{btn.innerHTML="⇣ "+percent+"%";}});
+          toast("Load All: done.");
         }
         catch{ bumpErr("load_all"); toast("Load All: failed."); }
         finally{
           btn.disabled=false;
-          // updateCounts will set correct text via updateLoadChip
-          btn.textContent="⇣";
-          btn.title="Force load all (ESC cancels)";
+          btn.innerHTML="⇣";
+          btn.style.cssText=""; // neutral — updateLoadChip will keep it neutral since ran=1
           updateCounts(false);
         }
         return;
@@ -1332,16 +1696,13 @@
         return;
       }
       if(action==="closeHelp"){ setOverlay("help",false); return; }
-
       if(action==="next"){ goNext(true); return; }
       if(action==="copyMissing"){ copyMissingVIDs(); return; }
       if(action==="copyAll"){ copyAllVIDs(); return; }
 
       if(action==="focusIn"){
         if(e.shiftKey){ setActiveUIKey("focus:inToShoot"); setFocus({type:"inToShoot",value:""},false); copyFocusVIDs(); return; }
-        // If already active → behave as Next (goNext handles auto-deselect at cycle end)
         if(focus.type==="inToShoot"){ goNext(true); return; }
-        // First click: activate and jump to first
         setActiveUIKey("focus:inToShoot");
         setFocus({type:"inToShoot",value:""},true);
         return;
@@ -1356,7 +1717,7 @@
 
       if(action==="setfocus"){
         const f=aEl.getAttribute("data-focus")||"";
-        const nf={missing:{type:"missing",value:""},inToShoot:{type:"inToShoot",value:""},ouToShoot:{type:"ouToShoot",value:""},rtwVideoMissing:{type:"rtwVideoMissing",value:""},rejected:{type:"rejected",value:""}}[f]||{type:"missing",value:""};
+        const nf={missing:{type:"missing",value:""},inToShoot:{type:"inToShoot",value:""},ouToShoot:{type:"ouToShoot",value:""},rtwVideoMissing:{type:"rtwVideoMissing",value:""},rejected:{type:"rejected",value:""},noShots:{type:"noShots",value:""}}[f]||{type:"missing",value:""};
         setActiveUIKey(`focus:${nf.type}`);
         if(e.shiftKey){focus=nf;saveEngineState();updateCounts(true);setTimeout(copyMissingVIDs,0);}
         else setFocus(nf,true);
@@ -1400,45 +1761,39 @@
   }
 
   // ═══════════════════════════════════════
-  // ensurePanel — single entry point
+  // ensurePanel
   // ═══════════════════════════════════════
   function ensurePanel(){
     if(document.getElementById(PANEL_ID))return document.getElementById(PANEL_ID);
     loadEngineState(); loadActiveUIKey();
     const panel=buildPanel();
-    // Do NOT append to body — we rely on mountPanel to insert it after anchor
     return panel;
   }
 
   // ═══════════════════════════════════════
-  // updateCounts — core logic
+  // updateCounts
   // ═══════════════════════════════════════
   function setEl(id,v){ document.querySelectorAll(`#${id}`).forEach(n=>{n.textContent=v;}); }
   function setW(id,w){ document.querySelectorAll(`#${id}`).forEach(n=>{n.style.width=w;}); }
 
   function updateLoadChip(loaded,totalVariants){
     const btn=document.getElementById("mwl-loadall-btn"); if(!btn)return;
-    // Also keep legacy chip hidden if it exists
-    const chip=document.getElementById("mwl-loadchip"); if(chip){chip.style.display="none";}
-    // If scrolling is in progress the button text is managed by the loadAll handler — don't overwrite
+    const chip=document.getElementById("mwl-loadchip"); if(chip)chip.style.display="none";
     if(btn.disabled)return;
-    if(isSearchRoute()||typeof totalVariants!=="number"||totalVariants<=0){
-      btn.textContent="⇣"; btn.title="Force load all (ESC cancels)";
-      btn.classList.remove("is-loading-red","is-loading-amber"); return;
+    // After first click — always neutral, no color states
+    if(btn.dataset.ran){
+      btn.innerHTML="⇣";
+      btn.style.cssText="";
+      btn.title="Force load all (ESC cancels)";
+      return;
     }
-    const rem=Math.max(0,totalVariants-loaded);
-    if(rem===0){
-      btn.textContent="⇣"; btn.title="All loaded";
-      btn.classList.remove("is-loading-red","is-loading-amber"); return;
-    }
-    btn.textContent=`⇣ −${rem}`;
-    btn.title=`Scroll to load ${rem} more (click to auto-scroll)`;
-    btn.classList.toggle("is-loading-red",rem>80);
-    btn.classList.toggle("is-loading-amber",rem<=80);
+    // Before first click — luxury gold START
+    btn.innerHTML="START ⇣";
+    btn.style.cssText="border-radius:6px;padding:3px 10px;font-size:10px;font-weight:800;letter-spacing:.10em;text-transform:uppercase;cursor:pointer;white-space:nowrap;line-height:1.5;border:1px solid;display:inline-flex;align-items:center;gap:5px;border-color:rgba(216,180,106,0.70);background:rgba(216,180,106,0.12);color:#d8b46a;";
+    btn.title="Run Load All first to ensure all variants are visible";
   }
 
   function updateDot(overallPct){
-    // Global dot removed — per-group dots are colored in updateCounts
     const dot=document.getElementById("mwl-dot"); if(dot){const {bg}=trafficColor(overallPct);dot.style.background=bg;}
   }
   function updateProgDot(id,pctVal){
@@ -1450,14 +1805,12 @@
     if(!isSupportedRoute())return;
     _countsDirty=false;
 
-    // Ensure panel exists and is mounted
     const panel=ensurePanel();
     mountPanel(panel);
-    if(!panel.classList.contains("mwl-visible"))return; // anchor not yet found
+    if(!panel.classList.contains("mwl-visible"))return;
 
     const flags=loadFlags();
 
-    // ── Search route ──
     if(isSearchRoute()){
       const products=safe("search_vids",()=>getProducts(flags),[]);
       const n=products.length;
@@ -1476,13 +1829,11 @@
       const inP=pct(inShot,totalIN), ouP=pct(ouShot,totalOU);
 
       if(totalIN>0||totalOU>0){
-        // Full analysis available — show real progress
         setW("mwl-in-bar",`${inP}%`); setW("mwl-ou-bar",`${ouP}%`);
         setEl("mwl-in-pct",`${inP}%`); setEl("mwl-ou-pct",`${ouP}%`);
         setEl("mwl-in-num",`${inShot}/${totalIN}`); setEl("mwl-ou-num",`${ouShot}/${totalOU}`);
         updateProgDot("mwl-dot-sl",inP); updateProgDot("mwl-dot-mo",ouP);
       } else {
-        // Only VID list — show count in Still Life slot, hide OU
         setW("mwl-in-bar","0%"); setW("mwl-ou-bar","0%");
         setEl("mwl-in-pct","—"); setEl("mwl-ou-pct","—");
         setEl("mwl-in-num",`${n} VIDs`); setEl("mwl-ou-num","—");
@@ -1491,6 +1842,7 @@
       const missingCount=analyses.filter(x=>isMissing(x.a)).length||n;
       setEl("mwl-focus-missing",String(missingCount));
       setEl("mwl-focus-rtwvideo","0"); setEl("mwl-focus-rej","0");
+      setEl("mwl-focus-noshots","0"); // [MOD 5]
       setEl("mwl-tag-inonly","0"); setEl("mwl-tag-omonly","0"); setEl("mwl-tag-modelsize","0");
       setEl("mwl-cat-rtw","0"); setEl("mwl-cat-acc","0");
       setEl("mwl-status-chip",`${n} VIDs`);
@@ -1498,13 +1850,12 @@
       updateLoadChip(n,null);
 
       focusList=analyses.filter(x=>isMissing(x.a));
-      if(!focusList.length)focusList=lastAnalyses.slice(); // fallback: all VIDs navigable
+      if(!focusList.length)focusList=lastAnalyses.slice();
       if(forceResetPointer)focusPtr=0; if(focusPtr>=focusList.length)focusPtr=0;
       if(lastHighlightedEl&&!lastHighlightedEl.isConnected)clearHighlight();
 
-      // Expose for coordinated scripts (e.g. Report Button)
       ensureMadameUtils()._lastProducts=products;
-      ensureMadameUtils()._totalVariants=null; // no variant total on search
+      ensureMadameUtils()._totalVariants=null;
 
       updateMissingPill(); applyActiveStyles(); return;
     }
@@ -1534,12 +1885,13 @@
     let rejectedLoaded=0; if(flags.enableRejectedKPI)rejectedLoaded=analyses.filter(x=>x.a.hasRejected).length;
     const missingCount=analyses.filter(x=>isMissing(x.a)).length;
 
-    // Progress bars
+    // [MOD 5] Count VIDs with zero shots in any defined slot
+    const noShotsCount=analyses.filter(x=>hasTotallyNoShots(x.a)).length;
+
     setW("mwl-in-bar",`${inP}%`); setW("mwl-ou-bar",`${ouP}%`);
     setEl("mwl-in-pct",`${inP}%`); setEl("mwl-ou-pct",`${ouP}%`);
     setEl("mwl-in-num",`${inShot}/${totalIN||0}`); setEl("mwl-ou-num",`${ouShot}/${totalOU||0}`);
 
-    // Status chip
     const {bg,text}=trafficColor(overallP);
     setEl("mwl-status-chip",`${text} · ${overallP}%`);
     const sc=document.getElementById("mwl-status-chip"); if(sc)sc.style.color=bg;
@@ -1547,26 +1899,21 @@
     updateProgDot("mwl-dot-sl", inP);
     updateProgDot("mwl-dot-mo", ouP);
 
-    // Missing
     setEl("mwl-focus-missing",String(missingCount));
-
-    // KPI
     setEl("mwl-cat-rtw",String(catRTW)); setEl("mwl-cat-acc",String(catACC));
     const rtwV=flags.enableRTWVideoKPI?String(rtwMissing):"0", rejV=flags.enableRejectedKPI?String(rejectedLoaded):"0";
     setEl("mwl-focus-rtwvideo",rtwV); setEl("mwl-focus-rej",rejV);
+    setEl("mwl-focus-noshots",String(noShotsCount)); // [MOD 5]
 
-    // Tags
     setEl("mwl-tag-inonly",String(tagCounts["IN ONLY"]||0));
     setEl("mwl-tag-omonly",String(tagCounts["OM ONLY"]||0));
     setEl("mwl-tag-modelsize",String(tagCounts["MODEL SIZE UNAVAILABLE"]||0));
 
-    // Focus list + ptr
     focusList=buildFocusList(analyses);
     if(forceResetPointer)focusPtr=0; if(focusPtr>=focusList.length)focusPtr=0;
     if(lastHighlightedEl&&!lastHighlightedEl.isConnected)clearHighlight();
     updateMissingPill();
 
-    // Alert pills
     const panel2=document.getElementById(PANEL_ID); if(panel2){
       qsa(".mwl-pill[data-focus]",panel2).forEach(p=>{
         const c=p.querySelector(".mwl-count"); const v=c?parseInt((c.textContent||"0"),10):NaN;
@@ -1576,9 +1923,8 @@
 
     applyActiveStyles();
 
-    lastKPIs={loaded,totalVariants,totalIN,totalOU,inShot,ouShot,inToShoot,ouToShoot,inP,ouP,catRTW,catACC,rtwTotal,rtwWithVideo,rtwMissing,rejectedLoaded};
+    lastKPIs={loaded,totalVariants,totalIN,totalOU,inShot,ouShot,inToShoot,ouToShoot,inP,ouP,catRTW,catACC,rtwTotal,rtwWithVideo,rtwMissing,rejectedLoaded,noShotsCount};
 
-    // Expose for coordinated scripts (e.g. Report Button)
     ensureMadameUtils()._lastProducts=products;
     ensureMadameUtils()._totalVariants=typeof totalVariants==="number"?totalVariants:null;
   }
@@ -1606,10 +1952,8 @@
   }
 
   function findProductContainer(){
-    // On worklist: the scrollable MuiBox that holds all product cards
     const s=document.querySelector('div.MuiBox-root[style*="overflow: auto"]');
     if(s&&s.clientHeight>200)return s;
-    // Fallback: observe body (safe but broad)
     return document.body;
   }
 
@@ -1618,7 +1962,6 @@
     if(_scrollRafId)return;
     _scrollRafId=requestAnimationFrame(()=>{
       _scrollRafId=null;
-      // Geometry sync (worklist only — search uses initFloatingPanel's own resize listener)
       if(isWorklistRoute()&&_scrollHandler)_scrollHandler();
       scheduleUpdate();
     });
@@ -1660,10 +2003,8 @@
   // ═══════════════════════════════════════
   function mount(){
     if(mounted)return; mounted=true;
-    // Inject styles immediately (before any DOM is visible)
     ensureStyles();
     const panel=ensurePanel();
-    // Try to mount now; MutationObserver will retry on each DOM change
     mountPanel(panel);
     attachListeners(); attachShortcuts(); scheduleUpdate();
   }
