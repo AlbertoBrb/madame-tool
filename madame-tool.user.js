@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Madame Dashboard
 // @namespace    https://tampermonkey.net/
-// @version      5.25.2
+// @version      5.25.3
 // @description  Dashboard embedded per worklist e search. Contatori Still Life / Model, navigazione VID, QC Carousel, Load All.
 // @author       AlbertoBrb
 // @match        https://madame.ynap.biz/*
@@ -16,11 +16,8 @@
 
   const GLOBAL_KEY = "__MWL_V512__";
   if (window[GLOBAL_KEY]) return;
-  window[GLOBAL_KEY] = { version: "5.25.2", startedAt: Date.now() };
+  window[GLOBAL_KEY] = { version: "5.25.3", startedAt: Date.now() };
 
-  // ═══════════════════════════════════════
-  // Routes
-  // ═══════════════════════════════════════
   const WORKLIST_RE = /^\/worklist\/\d+/;
   const SEARCH_RE   = /^\/search\b/;
   function isWorklistRoute() { return WORKLIST_RE.test(location.pathname); }
@@ -31,10 +28,7 @@
   }
   function isSupportedRoute(){ return isWorklistRoute() || isSearchRoute(); }
 
-  // ═══════════════════════════════════════
-  // Engine constants
-  // ═══════════════════════════════════════
-  const VID_SELECTOR   = "h4.css-10pdxui";
+  const VID_SELECTOR   = "h4.css-r9jghe";
   const TILE_SELECTOR  = "div.MuiBox-root.css-1dcsz0a";
   const LABEL_SELECTOR = "span[title]";
   const IMG_SELECTOR   = "img.css-1u8qly9";
@@ -50,9 +44,6 @@
   const RTW_TAG = "RTW";
   const QC_VIDEO_HEADER_SELECTOR = "div.MuiBox-root.css-45c539";
 
-  // ═══════════════════════════════════════
-  // QC constants
-  // ═══════════════════════════════════════
   const QC_WIDTH = 600;
   const QC_VIEW_ORDER = ["brand","in","ou","fr","bk","ou2","e1","e2","e3","e4","e5","e6","e7","e8","cu","pr","sw","rw","video"];
   const OVERLAY_VIEWS = new Set(["in","fr","ou","bk","ou2","e1","e2","e3","e4","e5","e6","e7","e8"]);
@@ -73,9 +64,6 @@
   };
   const SLOT_CODE_RE = /\/\s*(IN|OU|OU2|BK|FR|CU|PR|SW|RW|E[1-8])\s*$/i;
 
-  // ═══════════════════════════════════════
-  // Flags + Telemetry
-  // ═══════════════════════════════════════
   const FLAGS_KEY    = "mimo_wl_flags_v1";
   const TELEMETRY_KEY = "mimo_wl_telemetry_v1";
   const DEFAULT_FLAGS = {
@@ -91,9 +79,6 @@
   function bumpCnt(key,n=1){ if(!loadFlags().enableTelemetry)return; try{ const t=loadTelemetry(); t.counters[key]=(t.counters[key]||0)+n; localStorage.setItem(TELEMETRY_KEY,JSON.stringify(t)); }catch{} }
   function safe(label,fn,fb){ try{ return fn(); }catch{ bumpErr(label); return fb; } }
 
-  // ═══════════════════════════════════════
-  // Scroll helpers (Load All)
-  // ═══════════════════════════════════════
   function ensureMadameUtils(){ window.MadameUtils=window.MadameUtils||{}; return window.MadameUtils; }
   function findScrollableContainer(){
     const s=document.querySelector('div.MuiBox-root[style*="overflow: auto"]');
@@ -115,26 +100,19 @@
 
   async function forceLoadAllBalanced(opts={}){
     const sc=opts.container||findScrollableContainer();
-
-    // ── Tunable parameters ──
-    const pA          = opts.pauseA    ?? 350;  // base pause after each scroll step (ms)
-    const imgTimeout  = opts.imgTimeout?? 3500; // max wait per step for images to load (ms)
-    const imgPoll     = opts.imgPoll   ?? 100;  // polling interval while waiting for images (ms)
-    const renderWait  = opts.renderWait?? 300;  // extra settle at bottom before stability check (ms)
+    const pA          = opts.pauseA    ?? 350;
+    const imgTimeout  = opts.imgTimeout?? 3500;
+    const imgPoll     = opts.imgPoll   ?? 100;
+    const renderWait  = opts.renderWait?? 300;
     const mL          = opts.maxLoops  ?? 900;
     const mS          = opts.maxStable ?? 4;
 
-    // ── Adaptive image wait ──
-    // An image is considered "pending" if:
-    //   - it is not complete (browser hasn't finished decoding), OR
-    //   - it is complete but naturalWidth === 0 (error / not yet painted)
-    // We also check that the element is currently in the viewport.
     function pendingImgsInView(){
       const ch=gCH(sc);
       let count=0;
       for(const img of document.querySelectorAll(IMG_SELECTOR)){
         const r=img.getBoundingClientRect();
-        if(r.bottom<=0||r.top>=ch)continue; // outside viewport
+        if(r.bottom<=0||r.top>=ch)continue;
         if(!img.complete||img.naturalWidth===0)count++;
       }
       return count;
@@ -146,7 +124,6 @@
         if(pendingImgsInView()===0)return;
         await new Promise(r=>setTimeout(r,imgPoll));
       }
-      // Timeout reached — continue anyway rather than hanging forever
     }
 
     let cancelled=false;
@@ -158,33 +135,19 @@
 
       for(let i=0;i<mL;i++){
         if(cancelled)break;
-
-        // Scroll half a viewport at a time
         const step=opts.stepPx??Math.round(gCH(sc)*0.5);
         const top=gTop(sc), h=gSH(sc), ch=gCH(sc);
         sTop(sc, Math.min(top+step, Math.max(0,h-ch)));
-
-        // 1. Base pause — let React render newly visible components
         await new Promise(r=>setTimeout(r,pA));
-
-        // 2. Short extra frame for React virtual list to commit DOM nodes
         await new Promise(r=>requestAnimationFrame(r));
         await new Promise(r=>requestAnimationFrame(r));
-
-        // 3. Adaptive wait — hold until images in view have loaded (or timeout)
         await waitForImages();
-
-        // Progress callback
         const t2=gTop(sc), h2=gSH(sc), ch2=gCH(sc);
         if(typeof opts.onProgress==="function")
           opts.onProgress({loop:i, percent:Math.min(99,Math.round(((t2+ch2)/h2)*100)), height:h2});
-
-        // Stability check — only at bottom
         if(t2>=(h2-ch2-30)){
-          // Extra settle to catch any final lazy-triggered renders
           await new Promise(r=>setTimeout(r,renderWait));
           await waitForImages();
-
           const h3=gSH(sc);
           if(Math.abs(h3-lH)<2)sH++; else{sH=0; lH=h3;}
           const p=countPids(); if(p===lP)sP++; else{sP=0; lP=p;}
@@ -202,9 +165,6 @@
   }
   { const u=ensureMadameUtils(); if(!u.forceLoadAllBalanced)u.forceLoadAllBalanced=forceLoadAllBalanced; if(!u.findScrollableContainer)u.findScrollableContainer=findScrollableContainer; }
 
-  // ═══════════════════════════════════════
-  // Helpers
-  // ═══════════════════════════════════════
   const PANEL_ID  = "mwl-panel";
   const ATTR_NEXT    = "data-mwl-next";
   const ATTR_NOPHOTO = "data-mwl-nophoto";
@@ -244,9 +204,6 @@
     setTimeout(()=>{ t.classList.remove("show"); setTimeout(()=>t.remove(),200); },1300);
   }
 
-  // ═══════════════════════════════════════
-  // Engine state
-  // ═══════════════════════════════════════
   let focus = {type:"missing",value:""};
   let focusList=[], focusPtr=0;
   let lastHighlightedEl=null;
@@ -271,9 +228,6 @@
   function saveEngineState(){ try{ localStorage.setItem("MWL_ENGINE_V512",JSON.stringify({focus})); }catch{} }
   function loadEngineState(){ try{ const o=JSON.parse(localStorage.getItem("MWL_ENGINE_V512")||"null"); if(o?.focus)focus={type:o.focus.type||"missing",value:o.focus.value||""}; }catch{} }
 
-  // ═══════════════════════════════════════
-  // Product analysis
-  // ═══════════════════════════════════════
   function findProductRootFromVidNode(vidNode){
     let node=vidNode;
     for(let i=0;i<12&&node;i++){
@@ -351,7 +305,6 @@
   }
   function isMissing(a){ return(a.hasINSlot&&!a.hasINShot)||(a.hasOUSlot&&!a.hasOUShot); }
   function hasNoPhotos(a){ return(a.hasINSlot?!a.hasINShot:true)&&(a.hasOUSlot?!a.hasOUShot:true); }
-  // [MOD 5] — total absence of shots (no img at all in any slot)
   function hasTotallyNoShots(a){ return !a.hasINShot && !a.hasOUShot && (a.hasINSlot || a.hasOUSlot); }
   const _tagsCache = new WeakMap();
   function getProductTags(root){
@@ -373,9 +326,6 @@
     return root;
   }
 
-  // ═══════════════════════════════════════
-  // Focus
-  // ═══════════════════════════════════════
   function buildFocusList(analyses){
     const type=focus?.type||"missing", val=(focus?.value||"").toUpperCase();
     if(type==="tag")return analyses.filter(x=>x.tags?.has(val));
@@ -423,9 +373,6 @@
     updateCounts(true); if(doJump)goNext(false);
   }
 
-  // ═══════════════════════════════════════
-  // Parsing helpers
-  // ═══════════════════════════════════════
   function parseVariantsTotal(){ const s=getAriaById("info-box-1")||getTextById("info-box-1")||""; const m=s.match(/Number of variants:\s*(\d+)/i); return m?parseInt(m[1],10):null; }
   function trafficColor(p){ if(p>=80)return{bg:"#67e08a",text:"On track"}; if(p>=40)return{bg:"#ffcc66",text:"In progress"}; return{bg:"#ff5d5d",text:"Behind"}; }
   function absUrl(u){ if(!u)return""; if(u.startsWith("http://")||u.startsWith("https://"))return u; if(u.startsWith("/"))return location.origin+u; return u; }
@@ -440,12 +387,8 @@
     const panel=document.getElementById(PANEL_ID); if(!panel)return;
     const slEl=panel.querySelector("[data-action='focusIn']");
     const moEl=panel.querySelector("[data-action='focusOu']");
-    if(slEl)slEl.title=focus.type==="inToShoot"
-      ?"Still Life — click to go to next (N), Shift+click to copy"
-      :"Still Life — click to activate focus";
-    if(moEl)moEl.title=focus.type==="ouToShoot"
-      ?"Model — click to go to next (N), Shift+click to copy"
-      :"Model — click to activate focus";
+    if(slEl)slEl.title=focus.type==="inToShoot"?"Still Life — click to go to next (N), Shift+click to copy":"Still Life — click to activate focus";
+    if(moEl)moEl.title=focus.type==="ouToShoot"?"Model — click to go to next (N), Shift+click to copy":"Model — click to activate focus";
   }
   function updateMissingPill(){
     const pill=document.getElementById("mwl-missing-pill");
@@ -474,9 +417,6 @@
     updateProgTooltips();
   }
 
-  // ═══════════════════════════════════════
-  // Export
-  // ═══════════════════════════════════════
   function exportReportXls(){
     if(!loadFlags().enableReportExport)return; updateCounts(false);
     const wlName=(getTextById("info-box-0")||getAriaById("info-box-0")||(isSearchRoute()?"Search":"Worklist")).trim();
@@ -492,9 +432,6 @@
     dlFile(fname,"application/vnd.ms-excel;charset=utf-8","\ufeff"+html); bumpCnt("export_xls",1);
   }
 
-  // ═══════════════════════════════════════
-  // QC extraction
-  // ═══════════════════════════════════════
   function codeToView(c){ return(c||"").toLowerCase(); }
   function findTightProductContainer(vidEl){
     let node=vidEl;
@@ -511,28 +448,18 @@
   function extractQCMap_Surgical(){
     const map={}, vf=new Set();
 
-    // ── Strategy: iterate all tiles on the page, find the VID they belong to ──
-    // This avoids relying on findTightProductContainer which can fail if the
-    // h4 VID lives in a different branch from the tiles.
-    //
-    // For each tile (div.css-1dcsz0a), we walk UP the DOM to find the nearest
-    // h4 whose text is a numeric VID. That h4 is the owner of this tile.
-
     function nearestVID(el){
       let node=el;
       for(let i=0;i<20&&node;i++){
-        // Check all h4 descendants of the current ancestor
         const h4s=Array.from(node.querySelectorAll("h4"))
           .filter(h=>/^\d{10,}$/.test((h.textContent||"").trim()));
         if(h4s.length===1)return h4s[0].textContent.trim();
-        // If multiple h4s at this level, can't determine — go up
         node=node.parentElement;
       }
       return null;
     }
 
     for(const tile of Array.from(document.querySelectorAll(TILE_SELECTOR))){
-      // ── Video tile ──
       const hdr=tile.querySelector(QC_VIDEO_HEADER_SELECTOR);
       if(hdr&&/video/i.test(hdr.textContent||"")){
         const img=tile.querySelector(IMG_SELECTOR); if(!img)continue;
@@ -544,14 +471,13 @@
         continue;
       }
 
-      // ── Photo tile ──
       const lbl=Array.from(tile.querySelectorAll("span[title]"))
         .find(s=>SLOT_CODE_RE.test(s.getAttribute("title")||""));
       if(!lbl)continue;
       const m=(lbl.getAttribute("title")||"").trim().match(SLOT_CODE_RE); if(!m)continue;
       const view=codeToView(m[1]); vf.add(view);
       const img=tile.querySelector(IMG_SELECTOR);
-      if(!img)continue; // slot empty — no image to show
+      if(!img)continue;
       const src=img.getAttribute("src")||""; if(!src)continue;
       const vid=nearestVID(tile); if(!vid)continue;
       map[vid]||={};
@@ -559,11 +485,8 @@
       if(!map[vid][view])map[vid][view]={srcQC:absUrl(srcQC)};
     }
 
-    // Brand image: one per VID, found from the product container
-    // We already have the VIDs from the tile pass — now find brand img for each
     for(const vid of Object.keys(map)){
-      if(map[vid]["brand"])continue; // already set
-      // Find the h4 for this VID and walk up to find brand img
+      if(map[vid]["brand"])continue;
       const vidEl=Array.from(document.querySelectorAll("h4"))
         .find(h=>(h.textContent||"").trim()===vid);
       if(!vidEl)continue;
@@ -576,7 +499,6 @@
     }
     const vids=Object.keys(map).filter(v=>Object.keys(map[v]||{}).length>0);
     const orderedViews=[...QC_VIEW_ORDER.filter(v=>vf.has(v)),...Array.from(vf).filter(v=>!QC_VIEW_ORDER.includes(v)).sort()];
-    // Re-sort each VID's map keys to match VIEW_ORDER so JSON.stringify preserves order
     for(const vid of vids){
       const src=map[vid];
       const sorted={};
@@ -586,7 +508,7 @@
     }
     return{vids,views:orderedViews,map,loadedCount:vids.filter(v=>Object.values(map[v]||{}).some(x=>x?.srcQC)).length};
   }
-  // ── QC Overlay — injected in-page so images load with session cookies ──
+
   const QC_OVERLAY_ID = "mwl-qc-overlay";
 
   function closeQCOverlay(){
@@ -610,10 +532,8 @@
     if(!t)status="unknown"; else if(loaded>=t)status="ok"; else if(ratio!==null&&ratio<0.5)status="low";
     const missing=(t&&loaded<t)?(t-loaded):0, showMissing=Boolean(t&&status!=="ok");
 
-    // Remove any existing overlay
     closeQCOverlay();
 
-    // ── Inject overlay CSS once ──
     if(!document.getElementById("mwl-qc-styles")){
       const s=document.createElement("style");
       s.id="mwl-qc-styles";
@@ -670,11 +590,9 @@
       document.head.appendChild(s);
     }
 
-    // ── Build overlay DOM ──
     const overlay=document.createElement("div");
     overlay.id=QC_OVERLAY_ID;
 
-    // Topbar
     const bar=document.createElement("div"); bar.className="mwl-qc-bar";
     const row1=document.createElement("div"); row1.className="mwl-qc-row1";
 
@@ -712,11 +630,9 @@
     row2.appendChild(sepEl); row2.appendChild(wlEl); bar.appendChild(row2);
     overlay.appendChild(bar);
 
-    // Body
     const body=document.createElement("div"); body.className="mwl-qc-body"; body.id="mwl-qc-body";
     overlay.appendChild(body);
 
-    // Lightbox
     const lb=document.createElement("div"); lb.className="mwl-qc-lb"; lb.id="mwl-qc-lb";
     const lbInner=document.createElement("div"); lbInner.className="mwl-qc-lb-inner";
     const lbPrev=document.createElement("button"); lbPrev.className="mwl-qc-lb-nav mwl-qc-lb-prev"; lbPrev.innerHTML="‹";
@@ -730,7 +646,6 @@
     document.body.appendChild(overlay);
     document.body.style.overflow="hidden";
 
-    // ── JS logic (runs in main page context — cookies work) ──
     const selectedVIDs=new Set();
     let overlayOn=false, brandOn=false, refsOn=false, refIndex=0;
     const RSK="mimo_qc_ref_index_v1";
@@ -749,7 +664,6 @@
       btnCopySel.title=n>0?"Copy "+n+" VID(s)":"Select VIDs to copy";
     }
 
-    // Lightbox
     const NAV=[];
     function buildNav(){
       NAV.length=0;
@@ -767,7 +681,6 @@
     lb.addEventListener("click",e=>{if(e.target===lb)closeLB();});
     lbImg.addEventListener("click",()=>{if(lbIdx!==-1)openLB(lbIdx+1);});
 
-    // Buttons
     function syncBtns(){
       btnGuides.classList.toggle("on",overlayOn);
       btnBrand.classList.toggle("on",brandOn);
@@ -795,7 +708,6 @@
       setTimeout(()=>{btnCopySel.removeAttribute("data-copied");updateSelBtn();},1400);
     });
 
-    // Keyboard
     function onKey(e){
       if(e.key==="Escape"){if(lb.classList.contains("open"))closeLB();else closeQCOverlay();e.preventDefault();return;}
       if(lb.classList.contains("open")){
@@ -805,14 +717,11 @@
       if(e.key==="g"||e.key==="G"){overlayOn=!overlayOn;syncBtns();render();}
     }
     overlay.addEventListener("keydown",onKey);
-    // Also catch keydown on window while overlay is open
     function winKey(e){if(document.getElementById(QC_OVERLAY_ID))onKey(e);}
     window.addEventListener("keydown",winKey);
-    // Clean up listener when overlay is removed
     const mo=new MutationObserver(()=>{if(!document.getElementById(QC_OVERLAY_ID)){window.removeEventListener("keydown",winKey);mo.disconnect();}});
     mo.observe(document.body,{childList:true});
 
-    // Render
     function mkRef(aRef){
       const tile=document.createElement("div"); tile.className="mwl-qc-tile";
       const rw=document.createElement("div"); rw.className="mwl-qc-refwrap";
@@ -833,40 +742,30 @@
         const views=data.views.filter(v=>!(!brandOn&&v==="brand")&&data.map[vid][v]?.srcQC);
         if(!views.length)continue;
         const block=document.createElement("div"); block.className="mwl-qc-block";
-
-        // VID header with checkbox
         const vidRow=document.createElement("div"); vidRow.className="mwl-qc-vidrow";
         const cb=document.createElement("input"); cb.type="checkbox"; cb.className="mwl-qc-vidcb";
         cb.checked=selectedVIDs.has(vid);
         cb.addEventListener("change",()=>{if(cb.checked)selectedVIDs.add(vid);else selectedVIDs.delete(vid);updateSelBtn();});
         const vidLabel=document.createElement("div"); vidLabel.className="mwl-qc-vidlabel"; vidLabel.textContent=vid;
         vidRow.appendChild(cb); vidRow.appendChild(vidLabel); block.appendChild(vidRow);
-
         const row=document.createElement("div"); row.className="mwl-qc-row";
         let refInserted=false;
-
         for(const view of views){
           const cell=data.map[vid][view]; if(!cell?.srcQC)continue;
           const tile=document.createElement("div"); tile.className="mwl-qc-tile";
           const iw=document.createElement("div"); iw.className="mwl-qc-imgwrap";
           const img=document.createElement("img"); img.loading="lazy"; img.src=cell.srcQC;
           iw.appendChild(img);
-
-          // Guide overlay
           if(overlayOn&&OVERLAY_VIEWS.has(view)){
             const ov=document.createElement("img"); ov.className="ov"; ov.alt="";
             ov.src=OVERLAY_SP_URL; iw.appendChild(ov);
           }
-
-          // Click to open lightbox
           const navIdx=NAV.findIndex(x=>x.vid===vid&&x.view===view);
           iw.addEventListener("click",()=>openLB(navIdx>=0?navIdx:0));
           tile.appendChild(iw);
-
           const meta=document.createElement("div"); meta.className="mwl-qc-meta";
           meta.textContent=view==="brand"?"brand image":view;
           tile.appendChild(meta); row.appendChild(tile);
-
           if(aRef&&!refInserted&&view==="ou"){refInserted=true;row.appendChild(mkRef(aRef));}
         }
         if(aRef&&!refInserted)row.appendChild(mkRef(aRef));
@@ -877,10 +776,6 @@
     refIndex=getRI(); syncBtns(); updateSelBtn(); render();
   }
 
-
-  // ═══════════════════════════════════════
-  // Styles
-  // ═══════════════════════════════════════
   let stylesInjected=false;
   function ensureStyles(){
     if(stylesInjected)return; stylesInjected=true;
@@ -901,458 +796,113 @@
         --mwl-r:     10px;
         --mwl-font:  ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
       }
-
-      #mwl-panel {
-        display: none;
-        font-family: var(--mwl-font);
-        font-size: 12px;
-        color: var(--mwl-txt);
-        background: linear-gradient(160deg, var(--mwl-bg), var(--mwl-bg2));
-        border-radius: var(--mwl-r);
-        margin: 0;
-        /* z-index set inline by applyFixedGeometry / initFloatingPanel */
-      }
-      .MuiBox-root:has(#mwl-panel),
-      .MuiPaper-root:has(#mwl-panel) {
-        overflow: visible !important;
-      }
-      #mwl-panel.mwl-visible { display: block; }
-      #mwl-panel.mwl-minimized .mwl-drawer,
-      #mwl-panel.mwl-minimized .mwl-strip-bottom { display: none !important; }
-
-      #mwl-panel.mwl-floating {
-        box-shadow: 0 8px 32px rgba(0,0,0,0.45), 0 2px 8px rgba(0,0,0,0.28);
-        border: 1px solid rgba(255,255,255,0.10);
-        position: fixed !important;
-      }
-      #mwl-panel.mwl-floating .mwl-strip { cursor: grab; user-select: none; }
-      #mwl-panel.mwl-floating .mwl-strip:active { cursor: grabbing; }
-
-      #mwl-resize-handle {
-        position: absolute;
-        bottom: 0; right: 0;
-        width: 16px; height: 16px;
-        cursor: se-resize;
-        z-index: 10;
-        background: linear-gradient(135deg, transparent 50%, rgba(255,255,255,0.15) 50%);
-        border-radius: 0 0 var(--mwl-r) 0;
-      }
-      #mwl-resize-handle:hover {
-        background: linear-gradient(135deg, transparent 50%, rgba(255,255,255,0.30) 50%);
-      }
-
-      #mwl-float-reset {
-        display: none;
-        border: 1px solid rgba(255,255,255,0.10);
-        background: rgba(255,255,255,0.04);
-        color: rgba(255,255,255,0.40);
-        border-radius: 6px; padding: 3px 7px;
-        font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase;
-        cursor: pointer; white-space: nowrap; line-height: 1.5;
-        transition: background .10s, color .10s;
-      }
-      #mwl-panel.mwl-floating #mwl-float-reset { display: inline-flex; align-items: center; }
-      #mwl-float-reset:hover { background: rgba(255,255,255,0.09); color: rgba(255,255,255,0.80); }
-
-      .mwl-strip {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        padding: 8px 10px;
-        flex-wrap: nowrap;
-        overflow-x: auto;
-        scrollbar-width: none; /* Firefox */
-        -ms-overflow-style: none; /* IE/Edge */
-      }
-      .mwl-strip::-webkit-scrollbar { display: none; } /* Chrome/Safari */
-
-      .mwl-dot {
-        width: 6px; height: 6px; border-radius: 99px; flex: 0 0 6px;
-        background: var(--mwl-amber);
-        transition: background .3s ease;
-      }
-
-      .mwl-prog {
-        display: flex;
-        align-items: center;
-        gap: 4px;
-        flex: 0 0 auto;
-      }
-      .mwl-prog-lbl {
-        font-size: 9px; font-weight: 800; letter-spacing: .10em; text-transform: uppercase;
-        color: var(--mwl-sub); flex: 0 0 auto; white-space: nowrap;
-      }
-      .mwl-prog-bar {
-        width: 48px; height: 4px; border-radius: 99px;
-        background: rgba(255,255,255,0.08); overflow: hidden; flex: 0 0 48px;
-      }
-      .mwl-prog-bar > i {
-        display: block; height: 100%; width: 0%;
-        background: linear-gradient(90deg, rgba(216,180,106,0.85), rgba(255,255,255,0.50));
-        border-radius: 99px; transition: width .45s ease;
-      }
-      .mwl-prog-pct {
-        font-size: 9.5px; font-weight: 800;
-        color: rgba(255,255,255,0.46); flex: 0 0 auto; white-space: nowrap;
-        width: 4ch; text-align: right;
-        font-variant-numeric: tabular-nums;
-        display: inline-block;
-      }
-      .mwl-prog-num {
-        font-size: 10px; font-weight: 800;
-        color: rgba(255,255,255,0.72); flex: 0 0 auto; white-space: nowrap;
-        font-variant-numeric: tabular-nums;
-        width: 7ch; text-align: left;
-        display: inline-block;
-        margin-left: 4px;
-      }
-
-      #mwl-missing-pill {
-        display: inline-flex; align-items: center; gap: 4px;
-        padding: 3px 10px; border-radius: 999px;
-        border: 1px solid rgba(255,255,255,0.12);
-        background: rgba(255,255,255,0.04);
-        color: rgba(255,255,255,0.55);
-        font-size: 10px; font-weight: 800; letter-spacing: .05em;
-        flex: 0 0 auto;
-        cursor: pointer; user-select: none;
-        transition: background .10s, border-color .10s, color .10s;
-        white-space: nowrap;
-        font-variant-numeric: tabular-nums;
-      }
-      /* label part — muted */
-      #mwl-missing-pill .mwl-pill-label {
-        font-weight: 700;
-        opacity: 0.65;
-        font-size: 9px;
-        letter-spacing: .08em;
-        text-transform: uppercase;
-      }
-      /* count part — prominent */
-      #mwl-missing-pill .mwl-mc {
-        font-weight: 900;
-        font-size: 11px;
-        color: inherit;
-      }
-
-      .mwl-kpi-inline {
-        display: flex; align-items: center; gap: 4px; flex: 0 0 auto;
-        width: 10ch;
-      }
-      .mwl-prog-sep {
-        width: 1px; height: 11px; background: rgba(255,255,255,0.10); flex: 0 0 1px;
-      }
-
-      .mwl-prog-clickable {
-        cursor: pointer;
-        border-radius: 6px;
-        padding: 2px 5px;
-        margin: -2px -5px;
-        transition: background .10s;
-      }
-      .mwl-prog-clickable:hover { background: rgba(255,255,255,0.07); }
-      .mwl-prog-clickable.is-active { background: rgba(216,180,106,0.09); }
-      .mwl-prog-clickable.is-active .mwl-prog-lbl { color: var(--mwl-gold); }
-
-      .mwl-kpi-lbl {
-        font-size: 9px; font-weight: 800; letter-spacing: .10em; text-transform: uppercase;
-        color: var(--mwl-sub);
-      }
-      .mwl-kpi-val {
-        font-size: 10px; font-weight: 900; color: rgba(255,255,255,0.78);
-        font-variant-numeric: tabular-nums;
-      }
-      .mwl-kpi-dot {
-        font-size: 9px; color: rgba(255,255,255,0.20); margin: 0 1px;
-      }
-
-      .mwl-dcols-2 { grid-template-columns: 1fr 1fr !important; }
-
-      .mwl-pill-row {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 4px;
-        margin-top: 3px;
-      }
-
-      #mwl-next-btn {
-        font-variant-numeric: tabular-nums;
-        min-width: 0;
-        white-space: nowrap;
-        letter-spacing: .02em;
-      }
-      #mwl-next-btn { display: flex; align-items: center; justify-content: center; gap: 6px; }
-      .mwl-next-label { flex: 0 0 auto; }
-      .mwl-next-ptr {
-        flex: 0 0 auto;
-        font-variant-numeric: tabular-nums;
-        opacity: 0.70;
-        font-size: 9.5px;
-        letter-spacing: .02em;
-      }
-
-      .mwl-pill-label { flex: 0 0 auto; }
-
-      .mwl-prog, .mwl-prog-sep, .mwl-kpi-inline, #mwl-status-chip,
-      #mwl-missing-pill, .mwl-strip-actions { flex-shrink: 0; }
-      #mwl-missing-pill:hover { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.88); }
-      #mwl-missing-pill.has-items {
-        border-color: rgba(255,93,93,0.35);
-        background: rgba(255,93,93,0.08);
-        color: rgba(255,200,200,0.88);
-      }
-      #mwl-missing-pill.has-items:hover { background: rgba(255,93,93,0.14); }
-
-      #mwl-status-chip {
-        font-size: 9.5px; font-weight: 800; letter-spacing: .06em;
-        white-space: nowrap; flex: 0 0 15ch;
-        width: 15ch;
-        color: var(--mwl-amber);
-        transition: color .3s;
-        display: inline-block;
-        font-variant-numeric: tabular-nums;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-
-      .mwl-strip-actions {
-        display: flex; align-items: center; gap: 3px; flex: 0 0 auto; margin-left: auto;
-      }
-      .mwl-abtn {
-        border: 1px solid rgba(255,255,255,0.10);
-        background: rgba(255,255,255,0.04);
-        color: rgba(255,255,255,0.58);
-        border-radius: 6px; padding: 3px 7px;
-        font-size: 10px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase;
-        cursor: pointer; white-space: nowrap; line-height: 1.5;
-        transition: background .10s, color .10s, border-color .10s;
-      }
-      .mwl-abtn:hover { background: rgba(255,255,255,0.09); color: rgba(255,255,255,0.92); border-color: rgba(255,255,255,0.18); }
-
-      /* [MOD 1] Load button */
-      #mwl-loadall-btn { font-variant-numeric: tabular-nums; min-width: 2ch; }
-      /* needs-run: shown at mount to prompt the user to click ⇣ first */
-      #mwl-loadall-btn.needs-run {
-        border-color: rgba(216,180,106,0.65) !important;
-        background: rgba(216,180,106,0.14) !important;
-        color: var(--mwl-gold) !important;
-        box-shadow: 0 0 0 1px rgba(216,180,106,0.18);
-      }
-      /* is-loading: shown when scroll is in progress or variants still missing */
-      #mwl-loadall-btn.is-loading-amber {
-        border-color: rgba(255,204,102,0.70) !important;
-        background: rgba(255,204,102,0.18) !important;
-        color: #ffe066 !important;
-        box-shadow: 0 0 0 1px rgba(255,204,102,0.22);
-      }
-      #mwl-loadall-btn.is-loading-red {
-        border-color: rgba(255,80,80,0.80) !important;
-        background: rgba(255,80,80,0.18) !important;
-        color: #ff7070 !important;
-        box-shadow: 0 0 0 1px rgba(255,80,80,0.22);
-      }
-      #mwl-loadall-btn:disabled { opacity: 0.70; }
-
-      /* [MOD 2] Quality Check button — luxury gold outline */
-      .mwl-abtn-qc {
-        border-color: rgba(216,180,106,0.45) !important;
-        color: var(--mwl-gold) !important;
-        letter-spacing: .05em;
-        font-size: 9.5px;
-      }
-      .mwl-abtn-qc:hover {
-        background: rgba(216,180,106,0.10) !important;
-        border-color: rgba(216,180,106,0.70) !important;
-        color: #e8c97a !important;
-      }
-
-      #mwl-expand-btn {
-        border: 1px solid rgba(255,255,255,0.10);
-        background: rgba(255,255,255,0.04);
-        color: rgba(255,255,255,0.45);
-        border-radius: 6px; padding: 3px 8px;
-        font-size: 11px; font-weight: 900; line-height: 1.5;
-        cursor: pointer; user-select: none;
-        transition: background .10s, color .10s, border-color .10s;
-      }
-      #mwl-expand-btn:hover { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.85); }
-      #mwl-expand-btn.open {
-        border-color: rgba(216,180,106,0.35);
-        background: rgba(216,180,106,0.08);
-        color: var(--mwl-gold);
-      }
-
-      #mwl-min-btn {
-        border: 1px solid rgba(255,255,255,0.10);
-        background: rgba(255,255,255,0.04);
-        color: rgba(255,255,255,0.40);
-        border-radius: 6px; padding: 3px 8px;
-        font-size: 10px; font-weight: 900; line-height: 1.5;
-        cursor: pointer; user-select: none;
-        transition: background .10s, color .10s;
-      }
-      #mwl-min-btn:hover { background: rgba(255,93,93,0.10); color: rgba(255,180,180,0.90); border-color: rgba(255,93,93,0.24); }
-
-      #mwl-restore-bar {
-        display: none;
-        align-items: center;
-        justify-content: space-between;
-        padding: 6px 10px;
-        cursor: pointer;
-        user-select: none;
-      }
-      #mwl-panel.mwl-minimized #mwl-restore-bar { display: flex; }
-      #mwl-panel.mwl-minimized .mwl-strip { display: none; }
-
-      #mwl-panel.mwl-minimized {
-        background: rgba(255,255,255,0.96) !important;
-        box-shadow: 0 1px 4px rgba(0,0,0,0.08) !important;
-        border-radius: 8px !important;
-        width: auto !important;
-        margin-left: auto !important;
-        display: block;
-      }
-      #mwl-panel.mwl-minimized #mwl-restore-bar {
-        padding: 5px 12px;
-        white-space: nowrap;
-      }
-      #mwl-panel.mwl-minimized .mwl-restore-label { color: rgba(0,0,0,0.38); }
-      #mwl-panel.mwl-minimized .mwl-restore-chev  { color: rgba(0,0,0,0.22); }
-      #mwl-panel.mwl-minimized:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.12) !important; }
-      #mwl-panel.mwl-minimized #mwl-restore-bar:hover .mwl-restore-label { color: rgba(0,0,0,0.65); }
-
-      .mwl-restore-label {
-        font-size: 10px; font-weight: 800; letter-spacing: .10em; text-transform: uppercase;
-        color: rgba(255,255,255,0.50);
-      }
-      .mwl-restore-chev { font-size: 11px; color: rgba(255,255,255,0.35); }
-      #mwl-restore-bar:hover .mwl-restore-label { color: rgba(255,255,255,0.80); }
-
-      .mwl-drawer {
-        display: none;
-        border-top: 1px solid rgba(255,255,255,0.06);
-        padding: 9px 10px 10px;
-      }
-      .mwl-drawer.open { display: block; }
-
-      .mwl-dcols {
-        display: grid;
-        grid-template-columns: 1fr 1fr 1fr;
-        gap: 8px;
-        margin-bottom: 7px;
-      }
-      .mwl-dcol { display: flex; flex-direction: column; gap: 4px; }
-      .mwl-dcol-title {
-        font-size: 9px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase;
-        color: var(--mwl-sub); margin-bottom: 2px;
-      }
-
-      .mwl-pill {
-        display: inline-flex; align-items: center; gap: 5px;
-        padding: 3px 8px; border-radius: 999px;
-        border: 1px solid var(--mwl-brd2);
-        background: rgba(255,255,255,0.04);
-        color: rgba(255,255,255,0.60);
-        font-size: 10px; font-weight: 800;
-        cursor: pointer; white-space: nowrap; width: fit-content;
-        transition: background .10s, border-color .10s, color .10s;
-      }
-      .mwl-pill:hover { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.90); }
-      .mwl-pill.is-active { border-color: rgba(216,180,106,0.50); background: rgba(216,180,106,0.10); color: rgba(255,255,255,0.92); }
-      .mwl-pill.is-alert  { border-color: rgba(255,204,102,0.35); background: rgba(255,204,102,0.07); }
-      .mwl-pill .mwl-count { font-weight: 900; color: rgba(255,255,255,0.88); }
-
-      .mwl-krow {
-        display: flex; align-items: center; justify-content: space-between;
-        font-size: 10px; color: var(--mwl-sub); padding: 1px 0;
-      }
-      .mwl-krow strong { font-weight: 900; color: rgba(255,255,255,0.82); }
-
-      .mwl-dfooter {
-        display: flex; align-items: center; gap: 5px;
-        padding-top: 7px;
-        border-top: 1px solid rgba(255,255,255,0.06);
-      }
-      .mwl-dbtn {
-        flex: 1; border: 1px solid var(--mwl-brd2);
-        background: rgba(255,255,255,0.04);
-        color: rgba(255,255,255,0.62);
-        border-radius: 6px; padding: 5px 6px;
-        font-size: 10px; font-weight: 800; cursor: pointer; text-align: center;
-        white-space: nowrap; transition: background .10s, color .10s;
-      }
-      .mwl-dbtn:hover { background: rgba(255,255,255,0.09); color: rgba(255,255,255,0.92); }
-      .mwl-dbtn.gold { border-color: rgba(216,180,106,0.35); background: rgba(216,180,106,0.08); color: var(--mwl-gold); }
-      .mwl-dbtn.gold:hover { background: rgba(216,180,106,0.15); }
-      /* Copy All is a bulk action — less visual weight than Copy Missing */
-      .mwl-dbtn.secondary {
-        flex: 0 0 auto;
-        font-size: 9px; letter-spacing: .06em;
-        color: rgba(255,255,255,0.35);
-        border-color: transparent;
-        background: transparent;
-      }
-      .mwl-dbtn.secondary:hover { color: rgba(255,255,255,0.65); background: rgba(255,255,255,0.05); border-color: var(--mwl-brd2); }
-      #mwl-focus-ptr { font-size: 9.5px; color: var(--mwl-dim); white-space: nowrap; margin-left: auto; padding-left: 4px; }
-
-      .mwl-overlay {
-        position: relative;
-        border-top: 1px solid rgba(255,255,255,0.07);
-        background: rgba(14,14,18,0.98);
-        padding: 10px;
-        display: none;
-      }
-      .mwl-overlay.open { display: block; }
-      .mwl-ov-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
-      .mwl-ov-title { font-size: 10px; font-weight: 900; letter-spacing: .14em; text-transform: uppercase; color: rgba(255,255,255,0.70); }
-      .mwl-ov-box { border: 1px solid rgba(255,255,255,0.09); background: rgba(255,255,255,0.03); border-radius: 8px; padding: 9px; margin-bottom: 8px; }
-      .mwl-obtn {
-        border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.05);
-        color: rgba(255,255,255,0.72); border-radius: 7px; padding: 5px 10px;
-        font-size: 10px; font-weight: 800; letter-spacing: .10em; text-transform: uppercase;
-        cursor: pointer; transition: background .10s;
-      }
-      .mwl-obtn:hover { background: rgba(255,255,255,0.10); color: rgba(255,255,255,0.95); }
-
-      /* Shortcut grid: 2-col key → description */
-      .mwl-help-grid {
-        display: grid;
-        grid-template-columns: auto 1fr;
-        gap: 5px 10px;
-        align-items: center;
-      }
-      .mwl-help-grid kbd {
-        display: inline-flex; align-items: center; justify-content: center;
-        min-width: 22px; padding: 1px 5px;
-        border: 1px solid rgba(255,255,255,0.20);
-        border-bottom-width: 2px;
-        border-radius: 4px;
-        background: rgba(255,255,255,0.07);
-        color: rgba(255,255,255,0.82);
-        font: 800 10px var(--mwl-font);
-        letter-spacing: .04em;
-        font-family: inherit;
-      }
-      .mwl-help-grid span {
-        font-size: 11px;
-        color: rgba(255,255,255,0.60);
-        line-height: 1.4;
-      }
-
-      [data-mwl-nophoto="1"] { outline: none !important; border: none !important; position: relative; border-radius: 12px; background: rgba(198,22,22,0.16) !important; box-shadow: inset 0 0 0 1px rgba(198,22,22,0.18) !important; }
-      [data-mwl-nophoto="1"]::before { content:""; position:absolute; left:0; top:8px; bottom:8px; width:4px; border-radius:999px; background:rgba(198,22,22,0.95); pointer-events:none; }
-      [data-mwl-next="1"] { box-shadow: inset 0 0 0 1px rgba(216,180,106,0.35), 0 0 0 3px rgba(216,180,106,0.50), 0 8px 24px rgba(216,180,106,0.24) !important; }
-      .mwl-focus-highlight { animation: mwlPulse 1.4s ease-in-out 0s 2; }
-      @keyframes mwlPulse { 0%{box-shadow:0 0 0 0 rgba(216,180,106,0)} 35%{box-shadow:0 0 0 6px rgba(216,180,106,0.22)} 100%{box-shadow:0 0 0 0 rgba(216,180,106,0)} }
-
-      .mwl-toast { position:fixed; z-index:999999; left:18px; bottom:18px; padding:9px 12px; border-radius:12px; background:rgba(15,15,19,0.94); border:1px solid rgba(255,255,255,0.12); color:rgba(255,255,255,0.90); font-family:var(--mwl-font); font-size:12px; box-shadow:0 4px 20px rgba(0,0,0,0.45); transform:translateY(10px); opacity:0; transition:opacity .18s, transform .18s; }
-      .mwl-toast.show { opacity:1; transform:translateY(0); }
+      #mwl-panel { display:none; font-family:var(--mwl-font); font-size:12px; color:var(--mwl-txt); background:linear-gradient(160deg,var(--mwl-bg),var(--mwl-bg2)); border-radius:var(--mwl-r); margin:0; }
+      .MuiBox-root:has(#mwl-panel),.MuiPaper-root:has(#mwl-panel){ overflow:visible!important; }
+      #mwl-panel.mwl-visible{ display:block; }
+      #mwl-panel.mwl-minimized .mwl-drawer,#mwl-panel.mwl-minimized .mwl-strip-bottom{ display:none!important; }
+      #mwl-panel.mwl-floating{ box-shadow:0 8px 32px rgba(0,0,0,0.45),0 2px 8px rgba(0,0,0,0.28); border:1px solid rgba(255,255,255,0.10); position:fixed!important; }
+      #mwl-panel.mwl-floating .mwl-strip{ cursor:grab; user-select:none; }
+      #mwl-panel.mwl-floating .mwl-strip:active{ cursor:grabbing; }
+      #mwl-resize-handle{ position:absolute; bottom:0; right:0; width:16px; height:16px; cursor:se-resize; z-index:10; background:linear-gradient(135deg,transparent 50%,rgba(255,255,255,0.15) 50%); border-radius:0 0 var(--mwl-r) 0; }
+      #mwl-resize-handle:hover{ background:linear-gradient(135deg,transparent 50%,rgba(255,255,255,0.30) 50%); }
+      #mwl-float-reset{ display:none; border:1px solid rgba(255,255,255,0.10); background:rgba(255,255,255,0.04); color:rgba(255,255,255,0.40); border-radius:6px; padding:3px 7px; font-size:9px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; cursor:pointer; white-space:nowrap; line-height:1.5; transition:background .10s,color .10s; }
+      #mwl-panel.mwl-floating #mwl-float-reset{ display:inline-flex; align-items:center; }
+      #mwl-float-reset:hover{ background:rgba(255,255,255,0.09); color:rgba(255,255,255,0.80); }
+      .mwl-strip{ display:flex; align-items:center; gap:10px; padding:8px 10px; flex-wrap:nowrap; overflow-x:auto; scrollbar-width:none; -ms-overflow-style:none; }
+      .mwl-strip::-webkit-scrollbar{ display:none; }
+      .mwl-dot{ width:6px; height:6px; border-radius:99px; flex:0 0 6px; background:var(--mwl-amber); transition:background .3s ease; }
+      .mwl-prog{ display:flex; align-items:center; gap:4px; flex:0 0 auto; }
+      .mwl-prog-lbl{ font-size:9px; font-weight:800; letter-spacing:.10em; text-transform:uppercase; color:var(--mwl-sub); flex:0 0 auto; white-space:nowrap; }
+      .mwl-prog-bar{ width:48px; height:4px; border-radius:99px; background:rgba(255,255,255,0.08); overflow:hidden; flex:0 0 48px; }
+      .mwl-prog-bar>i{ display:block; height:100%; width:0%; background:linear-gradient(90deg,rgba(216,180,106,0.85),rgba(255,255,255,0.50)); border-radius:99px; transition:width .45s ease; }
+      .mwl-prog-pct{ font-size:9.5px; font-weight:800; color:rgba(255,255,255,0.46); flex:0 0 auto; white-space:nowrap; width:4ch; text-align:right; font-variant-numeric:tabular-nums; display:inline-block; }
+      .mwl-prog-num{ font-size:10px; font-weight:800; color:rgba(255,255,255,0.72); flex:0 0 auto; white-space:nowrap; font-variant-numeric:tabular-nums; width:7ch; text-align:left; display:inline-block; margin-left:4px; }
+      #mwl-missing-pill{ display:inline-flex; align-items:center; gap:4px; padding:3px 10px; border-radius:999px; border:1px solid rgba(255,255,255,0.12); background:rgba(255,255,255,0.04); color:rgba(255,255,255,0.55); font-size:10px; font-weight:800; letter-spacing:.05em; flex:0 0 auto; cursor:pointer; user-select:none; transition:background .10s,border-color .10s,color .10s; white-space:nowrap; font-variant-numeric:tabular-nums; }
+      #mwl-missing-pill .mwl-pill-label{ font-weight:700; opacity:0.65; font-size:9px; letter-spacing:.08em; text-transform:uppercase; }
+      #mwl-missing-pill .mwl-mc{ font-weight:900; font-size:11px; color:inherit; }
+      .mwl-kpi-inline{ display:flex; align-items:center; gap:4px; flex:0 0 auto; width:10ch; }
+      .mwl-prog-sep{ width:1px; height:11px; background:rgba(255,255,255,0.10); flex:0 0 1px; }
+      .mwl-prog-clickable{ cursor:pointer; border-radius:6px; padding:2px 5px; margin:-2px -5px; transition:background .10s; }
+      .mwl-prog-clickable:hover{ background:rgba(255,255,255,0.07); }
+      .mwl-prog-clickable.is-active{ background:rgba(216,180,106,0.09); }
+      .mwl-prog-clickable.is-active .mwl-prog-lbl{ color:var(--mwl-gold); }
+      .mwl-kpi-lbl{ font-size:9px; font-weight:800; letter-spacing:.10em; text-transform:uppercase; color:var(--mwl-sub); }
+      .mwl-kpi-val{ font-size:10px; font-weight:900; color:rgba(255,255,255,0.78); font-variant-numeric:tabular-nums; }
+      .mwl-kpi-dot{ font-size:9px; color:rgba(255,255,255,0.20); margin:0 1px; }
+      .mwl-dcols-2{ grid-template-columns:1fr 1fr!important; }
+      .mwl-pill-row{ display:flex; flex-wrap:wrap; gap:4px; margin-top:3px; }
+      #mwl-next-btn{ font-variant-numeric:tabular-nums; min-width:0; white-space:nowrap; letter-spacing:.02em; display:flex; align-items:center; justify-content:center; gap:6px; }
+      .mwl-next-label{ flex:0 0 auto; }
+      .mwl-next-ptr{ flex:0 0 auto; font-variant-numeric:tabular-nums; opacity:0.70; font-size:9.5px; letter-spacing:.02em; }
+      .mwl-pill-label{ flex:0 0 auto; }
+      .mwl-prog,.mwl-prog-sep,.mwl-kpi-inline,#mwl-status-chip,#mwl-missing-pill,.mwl-strip-actions{ flex-shrink:0; }
+      #mwl-missing-pill:hover{ background:rgba(255,255,255,0.08); color:rgba(255,255,255,0.88); }
+      #mwl-missing-pill.has-items{ border-color:rgba(255,93,93,0.35); background:rgba(255,93,93,0.08); color:rgba(255,200,200,0.88); }
+      #mwl-missing-pill.has-items:hover{ background:rgba(255,93,93,0.14); }
+      #mwl-status-chip{ font-size:9.5px; font-weight:800; letter-spacing:.06em; white-space:nowrap; flex:0 0 15ch; width:15ch; color:var(--mwl-amber); transition:color .3s; display:inline-block; font-variant-numeric:tabular-nums; overflow:hidden; text-overflow:ellipsis; }
+      .mwl-strip-actions{ display:flex; align-items:center; gap:3px; flex:0 0 auto; margin-left:auto; }
+      .mwl-abtn{ border:1px solid rgba(255,255,255,0.10); background:rgba(255,255,255,0.04); color:rgba(255,255,255,0.58); border-radius:6px; padding:3px 7px; font-size:10px; font-weight:800; letter-spacing:.07em; text-transform:uppercase; cursor:pointer; white-space:nowrap; line-height:1.5; transition:background .10s,color .10s,border-color .10s; }
+      .mwl-abtn:hover{ background:rgba(255,255,255,0.09); color:rgba(255,255,255,0.92); border-color:rgba(255,255,255,0.18); }
+      #mwl-loadall-btn{ font-variant-numeric:tabular-nums; min-width:2ch; }
+      .mwl-abtn-qc{ border-color:rgba(216,180,106,0.45)!important; color:var(--mwl-gold)!important; letter-spacing:.05em; font-size:9.5px; }
+      .mwl-abtn-qc:hover{ background:rgba(216,180,106,0.10)!important; border-color:rgba(216,180,106,0.70)!important; color:#e8c97a!important; }
+      #mwl-expand-btn{ border:1px solid rgba(255,255,255,0.10); background:rgba(255,255,255,0.04); color:rgba(255,255,255,0.45); border-radius:6px; padding:3px 8px; font-size:11px; font-weight:900; line-height:1.5; cursor:pointer; user-select:none; transition:background .10s,color .10s,border-color .10s; }
+      #mwl-expand-btn:hover{ background:rgba(255,255,255,0.08); color:rgba(255,255,255,0.85); }
+      #mwl-expand-btn.open{ border-color:rgba(216,180,106,0.35); background:rgba(216,180,106,0.08); color:var(--mwl-gold); }
+      #mwl-min-btn{ border:1px solid rgba(255,255,255,0.10); background:rgba(255,255,255,0.04); color:rgba(255,255,255,0.40); border-radius:6px; padding:3px 8px; font-size:10px; font-weight:900; line-height:1.5; cursor:pointer; user-select:none; transition:background .10s,color .10s; }
+      #mwl-min-btn:hover{ background:rgba(255,93,93,0.10); color:rgba(255,180,180,0.90); border-color:rgba(255,93,93,0.24); }
+      #mwl-restore-bar{ display:none; align-items:center; justify-content:space-between; padding:6px 10px; cursor:pointer; user-select:none; }
+      #mwl-panel.mwl-minimized #mwl-restore-bar{ display:flex; }
+      #mwl-panel.mwl-minimized .mwl-strip{ display:none; }
+      #mwl-panel.mwl-minimized{ background:rgba(255,255,255,0.96)!important; box-shadow:0 1px 4px rgba(0,0,0,0.08)!important; border-radius:8px!important; width:auto!important; margin-left:auto!important; display:block; }
+      #mwl-panel.mwl-minimized #mwl-restore-bar{ padding:5px 12px; white-space:nowrap; }
+      #mwl-panel.mwl-minimized .mwl-restore-label{ color:rgba(0,0,0,0.38); }
+      #mwl-panel.mwl-minimized .mwl-restore-chev{ color:rgba(0,0,0,0.22); }
+      #mwl-panel.mwl-minimized:hover{ box-shadow:0 2px 8px rgba(0,0,0,0.12)!important; }
+      #mwl-panel.mwl-minimized #mwl-restore-bar:hover .mwl-restore-label{ color:rgba(0,0,0,0.65); }
+      .mwl-restore-label{ font-size:10px; font-weight:800; letter-spacing:.10em; text-transform:uppercase; color:rgba(255,255,255,0.50); }
+      .mwl-restore-chev{ font-size:11px; color:rgba(255,255,255,0.35); }
+      #mwl-restore-bar:hover .mwl-restore-label{ color:rgba(255,255,255,0.80); }
+      .mwl-drawer{ display:none; border-top:1px solid rgba(255,255,255,0.06); padding:9px 10px 10px; }
+      .mwl-drawer.open{ display:block; }
+      .mwl-dcols{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; margin-bottom:7px; }
+      .mwl-dcol{ display:flex; flex-direction:column; gap:4px; }
+      .mwl-dcol-title{ font-size:9px; font-weight:800; letter-spacing:.14em; text-transform:uppercase; color:var(--mwl-sub); margin-bottom:2px; }
+      .mwl-pill{ display:inline-flex; align-items:center; gap:5px; padding:3px 8px; border-radius:999px; border:1px solid var(--mwl-brd2); background:rgba(255,255,255,0.04); color:rgba(255,255,255,0.60); font-size:10px; font-weight:800; cursor:pointer; white-space:nowrap; width:fit-content; transition:background .10s,border-color .10s,color .10s; }
+      .mwl-pill:hover{ background:rgba(255,255,255,0.08); color:rgba(255,255,255,0.90); }
+      .mwl-pill.is-active{ border-color:rgba(216,180,106,0.50); background:rgba(216,180,106,0.10); color:rgba(255,255,255,0.92); }
+      .mwl-pill.is-alert{ border-color:rgba(255,204,102,0.35); background:rgba(255,204,102,0.07); }
+      .mwl-pill .mwl-count{ font-weight:900; color:rgba(255,255,255,0.88); }
+      .mwl-krow{ display:flex; align-items:center; justify-content:space-between; font-size:10px; color:var(--mwl-sub); padding:1px 0; }
+      .mwl-krow strong{ font-weight:900; color:rgba(255,255,255,0.82); }
+      .mwl-dfooter{ display:flex; align-items:center; gap:5px; padding-top:7px; border-top:1px solid rgba(255,255,255,0.06); }
+      .mwl-dbtn{ flex:1; border:1px solid var(--mwl-brd2); background:rgba(255,255,255,0.04); color:rgba(255,255,255,0.62); border-radius:6px; padding:5px 6px; font-size:10px; font-weight:800; cursor:pointer; text-align:center; white-space:nowrap; transition:background .10s,color .10s; }
+      .mwl-dbtn:hover{ background:rgba(255,255,255,0.09); color:rgba(255,255,255,0.92); }
+      .mwl-dbtn.gold{ border-color:rgba(216,180,106,0.35); background:rgba(216,180,106,0.08); color:var(--mwl-gold); }
+      .mwl-dbtn.gold:hover{ background:rgba(216,180,106,0.15); }
+      .mwl-dbtn.secondary{ flex:0 0 auto; font-size:9px; letter-spacing:.06em; color:rgba(255,255,255,0.35); border-color:transparent; background:transparent; }
+      .mwl-dbtn.secondary:hover{ color:rgba(255,255,255,0.65); background:rgba(255,255,255,0.05); border-color:var(--mwl-brd2); }
+      #mwl-focus-ptr{ font-size:9.5px; color:var(--mwl-dim); white-space:nowrap; margin-left:auto; padding-left:4px; }
+      .mwl-overlay{ position:relative; border-top:1px solid rgba(255,255,255,0.07); background:rgba(14,14,18,0.98); padding:10px; display:none; }
+      .mwl-overlay.open{ display:block; }
+      .mwl-ov-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+      .mwl-ov-title{ font-size:10px; font-weight:900; letter-spacing:.14em; text-transform:uppercase; color:rgba(255,255,255,0.70); }
+      .mwl-ov-box{ border:1px solid rgba(255,255,255,0.09); background:rgba(255,255,255,0.03); border-radius:8px; padding:9px; margin-bottom:8px; }
+      .mwl-obtn{ border:1px solid rgba(255,255,255,0.12); background:rgba(255,255,255,0.05); color:rgba(255,255,255,0.72); border-radius:7px; padding:5px 10px; font-size:10px; font-weight:800; letter-spacing:.10em; text-transform:uppercase; cursor:pointer; transition:background .10s; }
+      .mwl-obtn:hover{ background:rgba(255,255,255,0.10); color:rgba(255,255,255,0.95); }
+      .mwl-help-grid{ display:grid; grid-template-columns:auto 1fr; gap:5px 10px; align-items:center; }
+      .mwl-help-grid kbd{ display:inline-flex; align-items:center; justify-content:center; min-width:22px; padding:1px 5px; border:1px solid rgba(255,255,255,0.20); border-bottom-width:2px; border-radius:4px; background:rgba(255,255,255,0.07); color:rgba(255,255,255,0.82); font:800 10px var(--mwl-font); letter-spacing:.04em; font-family:inherit; }
+      .mwl-help-grid span{ font-size:11px; color:rgba(255,255,255,0.60); line-height:1.4; }
+      [data-mwl-nophoto="1"]{ outline:none!important; border:none!important; position:relative; border-radius:12px; background:rgba(198,22,22,0.16)!important; box-shadow:inset 0 0 0 1px rgba(198,22,22,0.18)!important; }
+      [data-mwl-nophoto="1"]::before{ content:""; position:absolute; left:0; top:8px; bottom:8px; width:4px; border-radius:999px; background:rgba(198,22,22,0.95); pointer-events:none; }
+      [data-mwl-next="1"]{ box-shadow:inset 0 0 0 1px rgba(216,180,106,0.35),0 0 0 3px rgba(216,180,106,0.50),0 8px 24px rgba(216,180,106,0.24)!important; }
+      .mwl-focus-highlight{ animation:mwlPulse 1.4s ease-in-out 0s 2; }
+      @keyframes mwlPulse{ 0%{box-shadow:0 0 0 0 rgba(216,180,106,0)} 35%{box-shadow:0 0 0 6px rgba(216,180,106,0.22)} 100%{box-shadow:0 0 0 0 rgba(216,180,106,0)} }
+      .mwl-toast{ position:fixed; z-index:999999; left:18px; bottom:18px; padding:9px 12px; border-radius:12px; background:rgba(15,15,19,0.94); border:1px solid rgba(255,255,255,0.12); color:rgba(255,255,255,0.90); font-family:var(--mwl-font); font-size:12px; box-shadow:0 4px 20px rgba(0,0,0,0.45); transform:translateY(10px); opacity:0; transition:opacity .18s,transform .18s; }
+      .mwl-toast.show{ opacity:1; transform:translateY(0); }
     `);
   }
 
-  // ═══════════════════════════════════════
-  // Geometry
-  // ═══════════════════════════════════════
   let _fixedPlaceholder=null;
   let _resizeObserver=null;
   let _scrollHandler=null;
@@ -1374,15 +924,7 @@
     const ar=anchor.getBoundingClientRect();
     const headerBottom=getAppHeaderBottom();
     const top=Math.max(headerBottom+4, ar.bottom+4);
-    panel.style.cssText=`
-      position:fixed!important;
-      top:${top}px!important;
-      left:${ar.left}px!important;
-      width:${ar.width}px!important;
-      z-index:1250!important;
-      margin:0!important;
-      display:block;
-    `;
+    panel.style.cssText=`position:fixed!important;top:${top}px!important;left:${ar.left}px!important;width:${ar.width}px!important;z-index:1250!important;margin:0!important;display:block;`;
     if(!_fixedPlaceholder){
       _fixedPlaceholder=document.createElement("div");
       _fixedPlaceholder.id="mwl-placeholder";
@@ -1417,30 +959,16 @@
   function initFloatingPanel(panel){
     _floatListeners.forEach(({target,type,fn})=>target.removeEventListener(type,fn));
     _floatListeners=[];
-
     const saved=loadFloatPos();
     const W=saved?.w??360;
     const X=saved?.x??Math.max(16,window.innerWidth-W-24);
     const Y=saved?.y??80;
-
     const clampX=x=>Math.max(0,Math.min(window.innerWidth-60,x));
     const clampY=y=>Math.max(0,Math.min(window.innerHeight-40,y));
-
     function applyPos(x,y,w){
-      panel.style.cssText=`
-        position:fixed!important;
-        left:${clampX(x)}px!important;
-        top:${clampY(y)}px!important;
-        width:${Math.max(260,w)}px!important;
-        z-index:9000!important;
-        margin:0!important;
-        min-width:260px;
-        max-width:90vw;
-      `;
+      panel.style.cssText=`position:fixed!important;left:${clampX(x)}px!important;top:${clampY(y)}px!important;width:${Math.max(260,w)}px!important;z-index:9000!important;margin:0!important;min-width:260px;max-width:90vw;`;
     }
-
     applyPos(X,Y,W);
-
     const strip=panel.querySelector(".mwl-strip");
     if(strip){
       strip.style.cursor="grab";
@@ -1451,42 +979,22 @@
         const r=panel.getBoundingClientRect(); px=r.left; py=r.top;
         strip.style.cursor="grabbing"; e.preventDefault();
       });
-      const onDragMove=e=>{
-        if(!dragging)return;
-        const nx=px+(e.clientX-ox), ny=py+(e.clientY-oy);
-        const w=panel.offsetWidth;
-        applyPos(nx,ny,w); saveFloatPos(clampX(nx),clampY(ny),w);
-      };
-      const onDragUp=()=>{
-        if(dragging){dragging=false;strip.style.cursor="grab";}
-      };
+      const onDragMove=e=>{if(!dragging)return;const nx=px+(e.clientX-ox),ny=py+(e.clientY-oy);const w=panel.offsetWidth;applyPos(nx,ny,w);saveFloatPos(clampX(nx),clampY(ny),w);};
+      const onDragUp=()=>{if(dragging){dragging=false;strip.style.cursor="grab";}};
       _addFloatListener(window,"mousemove",onDragMove);
       _addFloatListener(window,"mouseup",onDragUp);
     }
-
     panel.querySelector("#mwl-resize-handle")?.remove();
     const resizeHandle=document.createElement("div");
-    resizeHandle.id="mwl-resize-handle";
-    resizeHandle.title="Drag to resize";
+    resizeHandle.id="mwl-resize-handle"; resizeHandle.title="Drag to resize";
     panel.appendChild(resizeHandle);
     let resizing=false,rox=0,rw0=0;
-    resizeHandle.addEventListener("mousedown",e=>{
-      resizing=true; rox=e.clientX; rw0=panel.offsetWidth; e.preventDefault(); e.stopPropagation();
-    });
-    const onResizeMove=e=>{
-      if(!resizing)return;
-      const nw=Math.max(260,rw0+(e.clientX-rox));
-      const r=panel.getBoundingClientRect();
-      applyPos(r.left,r.top,nw); saveFloatPos(clampX(r.left),clampY(r.top),nw);
-    };
+    resizeHandle.addEventListener("mousedown",e=>{resizing=true;rox=e.clientX;rw0=panel.offsetWidth;e.preventDefault();e.stopPropagation();});
+    const onResizeMove=e=>{if(!resizing)return;const nw=Math.max(260,rw0+(e.clientX-rox));const r=panel.getBoundingClientRect();applyPos(r.left,r.top,nw);saveFloatPos(clampX(r.left),clampY(r.top),nw);};
     const onResizeUp=()=>{resizing=false;};
     _addFloatListener(window,"mousemove",onResizeMove);
     _addFloatListener(window,"mouseup",onResizeUp);
-
-    const onWinResize=()=>{
-      const r=panel.getBoundingClientRect();
-      applyPos(r.left,r.top,panel.offsetWidth);
-    };
+    const onWinResize=()=>{const r=panel.getBoundingClientRect();applyPos(r.left,r.top,panel.offsetWidth);};
     _addFloatListener(window,"resize",onWinResize,{passive:true});
   }
 
@@ -1497,12 +1005,8 @@
       if(signals.filter(s=>txt.includes(s)).length>=2)return c.closest(".MuiBox-root")||c;
     }
     if(isSearchRoute()){
-      for(const c of document.querySelectorAll("[role='tabpanel']")){
-        if(!c.hidden&&c.style.display!=="none"&&c.offsetParent!==null)return c;
-      }
-      for(const c of document.querySelectorAll("[role='tabpanel']")){
-        if(!c.hidden)return c;
-      }
+      for(const c of document.querySelectorAll("[role='tabpanel']")){if(!c.hidden&&c.style.display!=="none"&&c.offsetParent!==null)return c;}
+      for(const c of document.querySelectorAll("[role='tabpanel']")){if(!c.hidden)return c;}
     }
     return null;
   }
@@ -1520,19 +1024,14 @@
     document.querySelectorAll(`#${PANEL_ID}`).forEach(p=>{if(p!==panel)p.remove();});
     if(isEmbedded(panel))return;
     stopGeometrySync();
-
     if(isSearchRoute()){
       if(!document.body.contains(panel))document.body.appendChild(panel);
       panel.classList.add("mwl-visible","mwl-floating");
       initFloatingPanel(panel);
       return;
     }
-
     const anchor=findAnchor();
-    if(!anchor){
-      requestAnimationFrame(()=>{ if(mounted&&isSupportedRoute())mountPanel(panel); });
-      return;
-    }
+    if(!anchor){ requestAnimationFrame(()=>{ if(mounted&&isSupportedRoute())mountPanel(panel); }); return; }
     if(!document.body.contains(panel))document.body.appendChild(panel);
     panel.classList.remove("mwl-floating");
     applyFixedGeometry(panel,anchor);
@@ -1540,13 +1039,9 @@
     startGeometrySync(panel,anchor);
   }
 
-  // ═══════════════════════════════════════
-  // Panel construction
-  // ═══════════════════════════════════════
   function buildPanel(){
     ensureStyles();
     const panel=el("div",{id:PANEL_ID});
-
     const restoreBar=el("div",{id:"mwl-restore-bar",title:"Click to expand"},[
       el("span",{class:"mwl-restore-label"},["Dashboard — click to expand"]),
       el("span",{class:"mwl-restore-chev"},["▾"]),
@@ -1556,7 +1051,6 @@
     const strip=el("div",{class:"mwl-strip"},[
       el("span",{id:"mwl-status-chip"},["—"]),
       el("div",{class:"mwl-prog-sep"}),
-
       el("div",{class:"mwl-prog mwl-prog-clickable","data-action":"focusIn","data-ui-key":"focus:inToShoot",title:"Still Life to shoot — click to jump to next"},[
         el("span",{class:"mwl-dot mwl-dot-sl",id:"mwl-dot-sl"}),
         el("span",{class:"mwl-prog-lbl"},["Still Life"]),
@@ -1564,9 +1058,7 @@
         el("span",{class:"mwl-prog-pct",id:"mwl-in-pct"},["—"]),
         el("span",{class:"mwl-prog-num",id:"mwl-in-num"},["—"]),
       ]),
-
       el("div",{class:"mwl-prog-sep"}),
-
       el("div",{class:"mwl-prog mwl-prog-clickable","data-action":"focusOu","data-ui-key":"focus:ouToShoot",title:"Model to shoot — click to jump to next"},[
         el("span",{class:"mwl-dot mwl-dot-mo",id:"mwl-dot-mo"}),
         el("span",{class:"mwl-prog-lbl"},["Model"]),
@@ -1574,16 +1066,12 @@
         el("span",{class:"mwl-prog-pct",id:"mwl-ou-pct"},["—"]),
         el("span",{class:"mwl-prog-num",id:"mwl-ou-num"},["—"]),
       ]),
-
       el("div",{class:"mwl-prog-sep"}),
-
       el("div",{id:"mwl-missing-pill","data-action":"next",title:"Missing — click to jump to next"},[
         el("span",{class:"mwl-pill-label"},["Missing "]),
         el("span",{class:"mwl-mc",id:"mwl-focus-missing"},["0"])
       ]),
-
       el("div",{class:"mwl-prog-sep"}),
-
       el("div",{class:"mwl-kpi-inline"},[
         el("span",{class:"mwl-kpi-lbl"},["RTW"]),
         el("span",{class:"mwl-kpi-val",id:"mwl-cat-rtw"},["0"]),
@@ -1591,10 +1079,8 @@
         el("span",{class:"mwl-kpi-lbl"},["ACC"]),
         el("span",{class:"mwl-kpi-val",id:"mwl-cat-acc"},["0"]),
       ]),
-
       el("div",{class:"mwl-strip-actions"},[
         el("button",{class:"mwl-abtn","data-action":"loadAll",id:"mwl-loadall-btn",title:"Force load all — run this first (ESC cancels)"},["⇣"]),
-        // [MOD 2] QC button with luxury gold styling and explicit label
         el("button",{class:"mwl-abtn mwl-abtn-qc","data-action":"qcOpen",title:"Open Quality Check Carousel"},["Quality Check"]),
         el("button",{id:"mwl-float-reset","data-action":"floatReset",title:"Reset panel position"},["⊹"]),
         el("button",{id:"mwl-expand-btn",title:"More"},["▾"]),
@@ -1604,7 +1090,6 @@
 
     const drawer=el("div",{class:"mwl-drawer"},[
       el("div",{class:"mwl-dcols mwl-dcols-2"},[
-        // Col 1 — Tags
         el("div",{class:"mwl-dcol"},[
           el("div",{class:"mwl-dcol-title"},["Tags"]),
           el("div",{class:"mwl-pill-row"},[
@@ -1613,13 +1098,11 @@
             el("div",{class:"mwl-pill","data-action":"tagfocus","data-tag":"MODEL SIZE UNAVAILABLE","data-ui-key":"tag:MODEL SIZE UNAVAILABLE"},["MODEL SIZE ",el("span",{class:"mwl-count",id:"mwl-tag-modelsize"},["0"])]),
           ]),
         ]),
-        // Col 2 — Focus (with [MOD 5] No shots pill)
         el("div",{class:"mwl-dcol"},[
           el("div",{class:"mwl-dcol-title"},["Focus"]),
           el("div",{class:"mwl-pill-row"},[
             el("div",{class:"mwl-pill","data-action":"setfocus","data-focus":"rtwVideoMissing","data-ui-key":"focus:rtwVideoMissing"},["RTW VIDEO ",el("span",{class:"mwl-count",id:"mwl-focus-rtwvideo"},["0"])]),
             el("div",{class:"mwl-pill","data-action":"setfocus","data-focus":"rejected","data-ui-key":"focus:rejected"},["Rejected ",el("span",{class:"mwl-count",id:"mwl-focus-rej"},["0"])]),
-            // [MOD 5] No shots uploaded pill — navigable focus
             el("div",{class:"mwl-pill","data-action":"setfocus","data-focus":"noShots","data-ui-key":"focus:noShots",title:"VIDs with slots defined but zero shots uploaded — click to jump, Shift+click to copy"},[
               "VID without shots ",
               el("span",{class:"mwl-count",id:"mwl-focus-noshots"},["0"])
@@ -1680,7 +1163,7 @@
         finally{
           btn.disabled=false;
           btn.innerHTML="⇣";
-          btn.style.cssText=""; // neutral — updateLoadChip will keep it neutral since ran=1
+          btn.style.cssText="";
           updateCounts(false);
         }
         return;
@@ -1689,7 +1172,7 @@
       if(action==="floatReset"){
         try{localStorage.removeItem(FLOAT_KEY);}catch{}
         const panel2=document.getElementById(PANEL_ID); if(panel2){
-          const W=360, X=Math.max(16,window.innerWidth-W-24), Y=80;
+          const W=360,X=Math.max(16,window.innerWidth-W-24),Y=80;
           panel2.style.left=X+"px"; panel2.style.top=Y+"px"; panel2.style.width=W+"px";
           saveFloatPos(X,Y,W);
         }
@@ -1699,22 +1182,16 @@
       if(action==="next"){ goNext(true); return; }
       if(action==="copyMissing"){ copyMissingVIDs(); return; }
       if(action==="copyAll"){ copyAllVIDs(); return; }
-
       if(action==="focusIn"){
         if(e.shiftKey){ setActiveUIKey("focus:inToShoot"); setFocus({type:"inToShoot",value:""},false); copyFocusVIDs(); return; }
         if(focus.type==="inToShoot"){ goNext(true); return; }
-        setActiveUIKey("focus:inToShoot");
-        setFocus({type:"inToShoot",value:""},true);
-        return;
+        setActiveUIKey("focus:inToShoot"); setFocus({type:"inToShoot",value:""},true); return;
       }
       if(action==="focusOu"){
         if(e.shiftKey){ setActiveUIKey("focus:ouToShoot"); setFocus({type:"ouToShoot",value:""},false); copyFocusVIDs(); return; }
         if(focus.type==="ouToShoot"){ goNext(true); return; }
-        setActiveUIKey("focus:ouToShoot");
-        setFocus({type:"ouToShoot",value:""},true);
-        return;
+        setActiveUIKey("focus:ouToShoot"); setFocus({type:"ouToShoot",value:""},true); return;
       }
-
       if(action==="setfocus"){
         const f=aEl.getAttribute("data-focus")||"";
         const nf={missing:{type:"missing",value:""},inToShoot:{type:"inToShoot",value:""},ouToShoot:{type:"ouToShoot",value:""},rtwVideoMissing:{type:"rtwVideoMissing",value:""},rejected:{type:"rejected",value:""},noShots:{type:"noShots",value:""}}[f]||{type:"missing",value:""};
@@ -1735,9 +1212,6 @@
     return panel;
   }
 
-  // ═══════════════════════════════════════
-  // Drawer / overlay / minimize helpers
-  // ═══════════════════════════════════════
   function setDrawerOpen(open){
     bannerExpanded=open;
     const panel=document.getElementById(PANEL_ID); if(!panel)return;
@@ -1760,34 +1234,24 @@
     if(which==="help")setOverlay("help",!helpOpen);
   }
 
-  // ═══════════════════════════════════════
-  // ensurePanel
-  // ═══════════════════════════════════════
   function ensurePanel(){
     if(document.getElementById(PANEL_ID))return document.getElementById(PANEL_ID);
     loadEngineState(); loadActiveUIKey();
-    const panel=buildPanel();
-    return panel;
+    return buildPanel();
   }
 
-  // ═══════════════════════════════════════
-  // updateCounts
-  // ═══════════════════════════════════════
   function setEl(id,v){ document.querySelectorAll(`#${id}`).forEach(n=>{n.textContent=v;}); }
   function setW(id,w){ document.querySelectorAll(`#${id}`).forEach(n=>{n.style.width=w;}); }
 
   function updateLoadChip(loaded,totalVariants){
     const btn=document.getElementById("mwl-loadall-btn"); if(!btn)return;
-    const chip=document.getElementById("mwl-loadchip"); if(chip)chip.style.display="none";
     if(btn.disabled)return;
-    // After first click — always neutral, no color states
     if(btn.dataset.ran){
       btn.innerHTML="⇣";
       btn.style.cssText="";
       btn.title="Force load all (ESC cancels)";
       return;
     }
-    // Before first click — luxury gold START
     btn.innerHTML="START ⇣";
     btn.style.cssText="border-radius:6px;padding:3px 10px;font-size:10px;font-weight:800;letter-spacing:.10em;text-transform:uppercase;cursor:pointer;white-space:nowrap;line-height:1.5;border:1px solid;display:inline-flex;align-items:center;gap:5px;border-color:rgba(216,180,106,0.70);background:rgba(216,180,106,0.12);color:#d8b46a;";
     btn.title="Run Load All first to ensure all variants are visible";
@@ -1804,30 +1268,21 @@
   function updateCounts(forceResetPointer=false){
     if(!isSupportedRoute())return;
     _countsDirty=false;
-
     const panel=ensurePanel();
     mountPanel(panel);
     if(!panel.classList.contains("mwl-visible"))return;
-
     const flags=loadFlags();
 
     if(isSearchRoute()){
       const products=safe("search_vids",()=>getProducts(flags),[]);
       const n=products.length;
-
-      const analyses=safe("search_analyses",()=>products.map(p=>{
-        const a=analyzeProduct(p,flags);
-        const tags=getProductTags(p.root);
-        return{...p,a,tags};
-      }),[]);
+      const analyses=safe("search_analyses",()=>products.map(p=>{const a=analyzeProduct(p,flags);const tags=getProductTags(p.root);return{...p,a,tags};}),[]);
       lastAnalyses=analyses.length?analyses:products.map(p=>({...p,a:{hasINSlot:false,hasOUSlot:false,hasINShot:false,hasOUShot:false,hasVideo:false,hasRejected:false},tags:new Set()}));
-
       const totalIN=analyses.filter(x=>x.a.hasINSlot).length;
       const totalOU=analyses.filter(x=>x.a.hasOUSlot).length;
       const inShot=analyses.filter(x=>x.a.hasINSlot&&x.a.hasINShot).length;
       const ouShot=analyses.filter(x=>x.a.hasOUSlot&&x.a.hasOUShot).length;
       const inP=pct(inShot,totalIN), ouP=pct(ouShot,totalOU);
-
       if(totalIN>0||totalOU>0){
         setW("mwl-in-bar",`${inP}%`); setW("mwl-ou-bar",`${ouP}%`);
         setEl("mwl-in-pct",`${inP}%`); setEl("mwl-ou-pct",`${ouP}%`);
@@ -1838,35 +1293,29 @@
         setEl("mwl-in-pct","—"); setEl("mwl-ou-pct","—");
         setEl("mwl-in-num",`${n} VIDs`); setEl("mwl-ou-num","—");
       }
-
       const missingCount=analyses.filter(x=>isMissing(x.a)).length||n;
       setEl("mwl-focus-missing",String(missingCount));
-      setEl("mwl-focus-rtwvideo","0"); setEl("mwl-focus-rej","0");
-      setEl("mwl-focus-noshots","0"); // [MOD 5]
+      setEl("mwl-focus-rtwvideo","0"); setEl("mwl-focus-rej","0"); setEl("mwl-focus-noshots","0");
       setEl("mwl-tag-inonly","0"); setEl("mwl-tag-omonly","0"); setEl("mwl-tag-modelsize","0");
       setEl("mwl-cat-rtw","0"); setEl("mwl-cat-acc","0");
       setEl("mwl-status-chip",`${n} VIDs`);
       const sc=document.getElementById("mwl-status-chip"); if(sc)sc.style.color="rgba(255,255,255,0.55)";
       updateLoadChip(n,null);
-
       focusList=analyses.filter(x=>isMissing(x.a));
       if(!focusList.length)focusList=lastAnalyses.slice();
       if(forceResetPointer)focusPtr=0; if(focusPtr>=focusList.length)focusPtr=0;
       if(lastHighlightedEl&&!lastHighlightedEl.isConnected)clearHighlight();
-
       ensureMadameUtils()._lastProducts=products;
       ensureMadameUtils()._totalVariants=null;
-
       updateMissingPill(); applyActiveStyles(); return;
     }
 
-    // ── Worklist route ──
     const products=safe("update_products",()=>getProducts(flags),[]); bumpCnt("updateCounts",1);
     const analyses=safe("update_analyses",()=>products.map(p=>{const a=analyzeProduct(p,flags);const tags=getProductTags(p.root);return{...p,a,tags};}),[]);
     lastAnalyses=analyses;
 
     if(flags.enableNoPhotoHighlight)for(const x of analyses)
-      safe("nophoto",()=>{ const t=getHighlightTarget(x.root); if(t)hasNoPhotos(x.a)?t.setAttribute(ATTR_NOPHOTO,"1"):t.removeAttribute(ATTR_NOPHOTO); },undefined);
+      safe("nophoto",()=>{const t=getHighlightTarget(x.root);if(t)hasNoPhotos(x.a)?t.setAttribute(ATTR_NOPHOTO,"1"):t.removeAttribute(ATTR_NOPHOTO);},undefined);
 
     const tagCounts=Object.fromEntries(TAGS_OF_INTEREST.map(t=>[t,0]));
     for(const x of analyses)for(const t of TAGS_OF_INTEREST)if(x.tags.has(t))tagCounts[t]++;
@@ -1884,8 +1333,6 @@
     if(flags.enableRTWVideoKPI){rtwTotal=catRTW;rtwWithVideo=analyses.filter(x=>x.tags?.has(RTW_TAG)&&x.a.hasVideo).length;rtwMissing=Math.max(0,rtwTotal-rtwWithVideo);}
     let rejectedLoaded=0; if(flags.enableRejectedKPI)rejectedLoaded=analyses.filter(x=>x.a.hasRejected).length;
     const missingCount=analyses.filter(x=>isMissing(x.a)).length;
-
-    // [MOD 5] Count VIDs with zero shots in any defined slot
     const noShotsCount=analyses.filter(x=>hasTotallyNoShots(x.a)).length;
 
     setW("mwl-in-bar",`${inP}%`); setW("mwl-ou-bar",`${ouP}%`);
@@ -1895,16 +1342,13 @@
     const {bg,text}=trafficColor(overallP);
     setEl("mwl-status-chip",`${text} · ${overallP}%`);
     const sc=document.getElementById("mwl-status-chip"); if(sc)sc.style.color=bg;
-    updateDot(overallP);
-    updateProgDot("mwl-dot-sl", inP);
-    updateProgDot("mwl-dot-mo", ouP);
+    updateDot(overallP); updateProgDot("mwl-dot-sl",inP); updateProgDot("mwl-dot-mo",ouP);
 
     setEl("mwl-focus-missing",String(missingCount));
     setEl("mwl-cat-rtw",String(catRTW)); setEl("mwl-cat-acc",String(catACC));
-    const rtwV=flags.enableRTWVideoKPI?String(rtwMissing):"0", rejV=flags.enableRejectedKPI?String(rejectedLoaded):"0";
-    setEl("mwl-focus-rtwvideo",rtwV); setEl("mwl-focus-rej",rejV);
-    setEl("mwl-focus-noshots",String(noShotsCount)); // [MOD 5]
-
+    setEl("mwl-focus-rtwvideo",flags.enableRTWVideoKPI?String(rtwMissing):"0");
+    setEl("mwl-focus-rej",flags.enableRejectedKPI?String(rejectedLoaded):"0");
+    setEl("mwl-focus-noshots",String(noShotsCount));
     setEl("mwl-tag-inonly",String(tagCounts["IN ONLY"]||0));
     setEl("mwl-tag-omonly",String(tagCounts["OM ONLY"]||0));
     setEl("mwl-tag-modelsize",String(tagCounts["MODEL SIZE UNAVAILABLE"]||0));
@@ -1922,20 +1366,14 @@
     }
 
     applyActiveStyles();
-
     lastKPIs={loaded,totalVariants,totalIN,totalOU,inShot,ouShot,inToShoot,ouToShoot,inP,ouP,catRTW,catACC,rtwTotal,rtwWithVideo,rtwMissing,rejectedLoaded,noShotsCount};
-
     ensureMadameUtils()._lastProducts=products;
     ensureMadameUtils()._totalVariants=typeof totalVariants==="number"?totalVariants:null;
   }
 
-  // ═══════════════════════════════════════
-  // Scheduling + SPA hooks
-  // ═══════════════════════════════════════
   function scheduleUpdate(){
     if(!mounted||!isSupportedRoute()||updateScheduled)return;
-    updateScheduled=true;
-    _countsDirty=true;
+    updateScheduled=true; _countsDirty=true;
     const flags=loadFlags(), run=()=>{ updateScheduled=false; updateCounts(false); };
     if(flags.enablePerfGating&&document.hidden){updateScheduled=false;return;}
     clearTimeout(updateTimer);
@@ -1972,10 +1410,7 @@
     const target=isWorklistRoute()?findProductContainer():document.body;
     observer=new MutationObserver(()=>scheduleUpdate());
     observer.observe(target,{childList:true,subtree:true});
-    if(!scrollAttached){
-      window.addEventListener("scroll",_onScroll,{passive:true});
-      scrollAttached=true;
-    }
+    if(!scrollAttached){ window.addEventListener("scroll",_onScroll,{passive:true}); scrollAttached=true; }
   }
   function detachListeners(){
     if(observer){observer.disconnect();observer=null;}
@@ -1998,9 +1433,6 @@
     },true);
   }
 
-  // ═══════════════════════════════════════
-  // Mount / unmount
-  // ═══════════════════════════════════════
   function mount(){
     if(mounted)return; mounted=true;
     ensureStyles();
